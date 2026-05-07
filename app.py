@@ -219,13 +219,16 @@ def filter_movements(
         )
 
         excluded_by_motivo = (
-            motivo.str.contains("DEFUNCION DEL ULTIMO O UNICO ASEGURADO", na=False)
-            | motivo.str.contains("DEFUNCION \\(QUEDAN MAS ASEGURADOS PERO NO LA QUIEREN\\)", na=False)
-            | motivo.str.contains("SINIESTRO TOTAL", na=False)
-            | motivo.str.contains("DEFUNCION", na=False)
+            motivo.str.startswith("DEFUNCION DEL ULTIMO O UNICO ASEGURADO", na=False)
+            | motivo.str.startswith("DEFUNCION (QUEDAN MAS ASEGURADOS PERO NO LA QUIEREN)", na=False)
+            | motivo.str.startswith("SINIESTRO TOTAL", na=False)
+            | motivo.str.startswith("DEFUNCION", na=False)
         )
 
-        excluded_by_causa = causa.str.contains("INDIVIDUAL POR SINIESTRO", na=False)
+        excluded_by_causa = (
+            causa.str.startswith("DEFUNCION", na=False)
+            | causa.str.startswith("INDIVIDUAL POR SINIESTRO", na=False)
+        )
 
         mask = mask & ~excluded_by_motivo & ~excluded_by_causa
 

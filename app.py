@@ -11,6 +11,8 @@ import streamlit as st
 DEFAULT_RANKING_DATE = date(2026, 1, 30)
 DEFAULT_EXCLUDED_PRODUCTS = ("D600", "D460")
 SINIESTRALIDAD_MAXIMA = 0.25
+LIGA_PRO_MINIMA = 30000.0
+LIGA_ELITE_MINIMA = 60000.0
 
 REQUIRED_FACTURACION_COLUMNS = (
     "PRODUCTO",
@@ -459,6 +461,7 @@ def calculate_ranking(
                 "IMPORTE_SINIESTROS",
                 "SINIESTRALIDAD",
                 "CUMPLE_SINIESTRALIDAD",
+                "LIGA",
                 "POLIZAS_ALTAS",
                 "POLIZAS_ANULADAS",
                 "POLIZAS_NETAS",
@@ -527,7 +530,15 @@ def calculate_ranking(
         )
     ]
 
-    ranking["CUMPLE_SINIESTRALIDAD"] = ranking["SINIESTRALIDAD"] < SINIESTRALIDAD_MAXIMA
+    ranking["CUMPLE_SINIESTRALIDAD"] = ranking["SINIESTRALIDAD"] <= SINIESTRALIDAD_MAXIMA
+
+    ranking["LIGA"] = [
+        classify_liga(facturacion_neta, cumple_siniestralidad)
+        for facturacion_neta, cumple_siniestralidad in zip(
+            ranking["FACTURACION_NETA"],
+            ranking["CUMPLE_SINIESTRALIDAD"],
+        )
+    ]
 
     ranking = ranking[
         [
@@ -543,6 +554,7 @@ def calculate_ranking(
             "IMPORTE_SINIESTROS",
             "SINIESTRALIDAD",
             "CUMPLE_SINIESTRALIDAD",
+            "LIGA",
             "POLIZAS_ALTAS",
             "POLIZAS_ANULADAS",
             "POLIZAS_NETAS",
@@ -595,6 +607,64 @@ def format_euro(value: float) -> str:
 
 def format_percent(value: float) -> str:
     return f"{value:.2%}".replace(".", ",")
+
+
+def classify_liga(facturacion_neta: float, cumple_siniestralidad: bool) -> str:
+    if not cumple_siniestralidad:
+        return "No cumple siniestralidad"
+
+    if facturacion_neta >= LIGA_ELITE_MINIMA:
+        return "LIGA ELITE"
+
+    if facturacion_neta >= LIGA_PRO_MINIMA:
+        return "LIGA PRO"
+
+    return "No clasifica"
+
+
+def build_ranking_ligas(ranking: pd.DataFrame) -> pd.DataFrame:
+    if ranking.empty:
+        return pd.DataFrame(
+            columns=[
+                "RANKING_LIGA",
+                "LIGA",
+                "AGENTE",
+                "NOMBRE_AGENCIA",
+                "FACTURACION_NETA",
+                "SINIESTRALIDAD",
+                "CUMPLE_SINIESTRALIDAD",
+                "IMPORTE_SINIESTROS",
+                "PRIMAS_NETAS",
+            ]
+        )
+
+    ranking_ligas = ranking[
+        ranking["LIGA"].isin(["LIGA ELITE", "LIGA PRO"])
+    ].copy()
+
+    liga_order = {"LIGA ELITE": 1, "LIGA PRO": 2}
+    ranking_ligas["ORDEN_LIGA"] = ranking_ligas["LIGA"].map(liga_order)
+
+    ranking_ligas = ranking_ligas.sort_values(
+        ["ORDEN_LIGA", "FACTURACION_NETA", "SINIESTRALIDAD", "AGENTE"],
+        ascending=[True, False, True, True],
+    )
+
+    ranking_ligas.insert(0, "RANKING_LIGA", range(1, len(ranking_ligas) + 1))
+
+    return ranking_ligas[
+        [
+            "RANKING_LIGA",
+            "LIGA",
+            "AGENTE",
+            "NOMBRE_AGENCIA",
+            "FACTURACION_NETA",
+            "SINIESTRALIDAD",
+            "CUMPLE_SINIESTRALIDAD",
+            "IMPORTE_SINIESTROS",
+            "PRIMAS_NETAS",
+        ]
+    ]
 
 
 def detail_columns_for_display(detail: pd.DataFrame) -> list[str]:
@@ -702,6 +772,7 @@ def dataframe_to_excel(
         parametros.to_excel(writer, index=False, sheet_name="PARAMETROS")
         sheet_summary.to_excel(writer, index=False, sheet_name="COMPROBACION_HOJAS")
         ranking.to_excel(writer, index=False, sheet_name="RANKING_NETO")
+        build_ranking_ligas(ranking).to_excel(writer, index=False, sheet_name="RANKING_LIGAS")
         altas_detail[detail_columns_for_display(altas_detail)].to_excel(
             writer,
             index=False,
@@ -926,31 +997,58 @@ def main() -> None:
     col9.metric("Siniestralidad total", format_percent(siniestralidad_total))
     col10.metric(
         "Cumple siniestralidad global",
-        "SI" if siniestralidad_total < SINIESTRALIDAD_MAXIMA else "NO",
+        "SI" if siniestralidad_total <= SINIESTRALIDAD_MAXIMA else "NO",
     )
 
-    st.subheader("Ranking facturacion neta con primas netas y siniestralidad")
+    ranking_ligas = build_ranking_ligas(ranking)
 
-    if ranking.empty:
-        st.info("No hay datos para los filtros seleccionados.")
+    vista = st.sidebar.radio(
+        "Ranking",
+        ["Ranking ligas", "Ranking completo"],
+    )
+
+    if vista == "Ranking ligas":
+        st.subheader("Ranking ligas - mediadores clasificados")
+        st.caption("LIGA PRO: desde 30.000 € hasta menos de 60.000 € de facturacion neta. LIGA ELITE: desde 60.000 €. En ambos casos, siniestralidad igual o inferior al 25%.")
+
+        if ranking_ligas.empty:
+            st.info("No hay mediadores clasificados para Liga Pro o Liga Elite con los filtros seleccionados.")
+        else:
+            st.dataframe(
+                ranking_ligas.style.format(
+                    {
+                        "FACTURACION_NETA": lambda value: format_euro(float(value)),
+                        "SINIESTRALIDAD": lambda value: format_percent(float(value)),
+                        "IMPORTE_SINIESTROS": lambda value: format_euro(float(value)),
+                        "PRIMAS_NETAS": lambda value: format_euro(float(value)),
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
     else:
-        st.dataframe(
-            ranking.style.format(
-                {
-                    "FACTURACION_ALTAS_BRUTAS": lambda value: format_euro(float(value)),
-                    "FACTURACION_ANULACIONES": lambda value: format_euro(float(value)),
-                    "FACTURACION_NETA": lambda value: format_euro(float(value)),
-                    "PRIMAS_EMITIDAS": lambda value: format_euro(float(value)),
-                    "PRIMAS_ANULADAS": lambda value: format_euro(float(value)),
-                    "PRIMAS_NETAS": lambda value: format_euro(float(value)),
-                    "IMPORTE_SINIESTROS": lambda value: format_euro(float(value)),
-                    "SINIESTRALIDAD": lambda value: format_percent(float(value)),
-                    "PRIMA_MEDIA_NETA": lambda value: format_euro(float(value)),
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.subheader("Ranking facturacion neta con primas netas y siniestralidad")
+
+        if ranking.empty:
+            st.info("No hay datos para los filtros seleccionados.")
+        else:
+            st.dataframe(
+                ranking.style.format(
+                    {
+                        "FACTURACION_ALTAS_BRUTAS": lambda value: format_euro(float(value)),
+                        "FACTURACION_ANULACIONES": lambda value: format_euro(float(value)),
+                        "FACTURACION_NETA": lambda value: format_euro(float(value)),
+                        "PRIMAS_EMITIDAS": lambda value: format_euro(float(value)),
+                        "PRIMAS_ANULADAS": lambda value: format_euro(float(value)),
+                        "PRIMAS_NETAS": lambda value: format_euro(float(value)),
+                        "IMPORTE_SINIESTROS": lambda value: format_euro(float(value)),
+                        "SINIESTRALIDAD": lambda value: format_percent(float(value)),
+                        "PRIMA_MEDIA_NETA": lambda value: format_euro(float(value)),
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     with st.expander("Detalle de altas incluidas"):
         st.dataframe(

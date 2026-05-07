@@ -743,8 +743,8 @@ def main() -> None:
     )
 
     default_excluded_siniestros = [
-        product for product in DEFAULT_EXCLUDED_SINIESTROS_PRODUCTS
-        if product in siniestros_product_options
+    product for product in DEFAULT_EXCLUDED_PRODUCTS
+    if product in siniestros_product_options
     ]
 
     excluded_siniestros_products = st.multiselect(

@@ -206,20 +206,30 @@ def filter_movements(
     )
 
     if movement == "ANULACION":
-    motivo = work["MOTIVO"].apply(normalize_reason_text) if "MOTIVO" in work.columns else ""
-    causa = work["CAUSA"].apply(normalize_reason_text) if "CAUSA" in work.columns else ""
+        motivo = (
+            work["MOTIVO"].apply(normalize_reason_text)
+            if "MOTIVO" in work.columns
+            else pd.Series("", index=work.index)
+        )
 
-    excluded_by_motivo = (
-        motivo.str.contains("DEFUNCION DEL ULTIMO O UNICO ASEGURADO", na=False)
-        | motivo.str.contains("DEFUNCION \\(QUEDAN MAS ASEGURADOS PERO NO LA QUIEREN\\)", na=False)
-        | motivo.str.contains("SINIESTRO TOTAL", na=False)
-        | motivo.str.contains("DEFUNCION", na=False)
-    )
+        causa = (
+            work["CAUSA"].apply(normalize_reason_text)
+            if "CAUSA" in work.columns
+            else pd.Series("", index=work.index)
+        )
 
-    excluded_by_causa = causa.str.contains("INDIVIDUAL POR SINIESTRO", na=False)
+        excluded_by_motivo = (
+            motivo.str.contains("DEFUNCION DEL ULTIMO O UNICO ASEGURADO", na=False)
+            | motivo.str.contains("DEFUNCION \\(QUEDAN MAS ASEGURADOS PERO NO LA QUIEREN\\)", na=False)
+            | motivo.str.contains("SINIESTRO TOTAL", na=False)
+            | motivo.str.contains("DEFUNCION", na=False)
+        )
 
-    mask = mask & ~excluded_by_motivo & ~excluded_by_causa
+        excluded_by_causa = causa.str.contains("INDIVIDUAL POR SINIESTRO", na=False)
 
+        mask = mask & ~excluded_by_motivo & ~excluded_by_causa
+
+    return work[mask].copy()
 def aggregate_movements(
     detail: pd.DataFrame,
     amount_column: str,

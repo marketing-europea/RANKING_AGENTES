@@ -18,6 +18,7 @@ REQUIRED_FACTURACION_COLUMNS = (
     "MEDIADOR",
     "PRIMA NETA",
 )
+
 REQUIRED_ANULACIONES_COLUMNS = (
     "PRODUCTO",
     "FECHA BAJA",
@@ -25,6 +26,7 @@ REQUIRED_ANULACIONES_COLUMNS = (
     "MEDIADOR",
     "PRIMA NETA",
 )
+
 AGENCY_NAME_COLUMNS = (
     "NOMBRE AGENCIA",
     "NOMBRE_AGENCIA",
@@ -33,8 +35,12 @@ AGENCY_NAME_COLUMNS = (
     "NOM MEDIADOR",
     "MEDIADOR NOMBRE",
 )
-DEPENDENCY_COLUMNS = ("SECTOCOB", "SECTOR", "DEPENDENCIA")
-GROUP_COLUMNS = ("AGENTE", "DEPENDENCIA")
+
+DEPENDENCY_COLUMNS = (
+    "SECTOCOB",
+    "SECTOR",
+    "DEPENDENCIA",
+)
 
 
 def parse_spanish_number(value: object) -> float:
@@ -70,35 +76,44 @@ def normalize_product(value: object) -> str:
     return str(value).strip().upper()
 
 
-def normalize_agent(value: object) -> str:
-    if pd.isna(value) or str(value).strip() == "":
-        return "Sin mediador"
-
-    text = str(value).strip()
-
-    if re.fullmatch(r"\d+\.0", text):
-        text = text[:-2]
-
-    return text
-
-
-def normalize_text(value: object, default: str) -> str:
+def normalize_text(value: object, default: str = "") -> str:
     if pd.isna(value) or str(value).strip() == "":
         return default
 
     text = str(value).strip()
+
     if re.fullmatch(r"\d+\.0", text):
         text = text[:-2]
 
     return text
 
 
-def first_existing_column(columns: list[str] | pd.Index, candidates: tuple[str, ...]) -> str | None:
+def normalize_cause(value: object) -> str:
+    if pd.isna(value):
+        return ""
+
+    text = str(value).strip().upper()
+    text = text.replace("Á", "A")
+    text = text.replace("É", "E")
+    text = text.replace("Í", "I")
+    text = text.replace("Ó", "O")
+    text = text.replace("Ú", "U")
+
+    return text
+
+
+def normalize_agent(value: object) -> str:
+    return normalize_text(value, "Sin mediador")
+
+
+def first_existing_column(columns: list[str] | pd.Index, options: tuple[str, ...]) -> str | None:
     normalized = {str(column).strip().upper(): str(column).strip() for column in columns}
-    for candidate in candidates:
-        column = normalized.get(candidate.upper())
+
+    for option in options:
+        column = normalized.get(option.upper())
         if column is not None:
             return column
+
     return None
 
 
@@ -106,6 +121,7 @@ def first_non_empty(values: pd.Series) -> str:
     for value in values:
         if not pd.isna(value) and str(value).strip() != "":
             return str(value).strip()
+
     return ""
 
 
@@ -129,8 +145,13 @@ def validate_columns(df: pd.DataFrame, required_columns: tuple[str, ...]) -> lis
     return [column for column in required_columns if column not in df.columns]
 
 
-def prepare_decesos_data(df: pd.DataFrame, date_column: str, movement: str) -> pd.DataFrame:
+def prepare_decesos_data(
+    df: pd.DataFrame,
+    date_column: str,
+    movement: str,
+) -> pd.DataFrame:
     work = df.copy()
+
     agency_name_column = first_existing_column(work.columns, AGENCY_NAME_COLUMNS)
     dependency_column = first_existing_column(work.columns, DEPENDENCY_COLUMNS)
 
@@ -154,7 +175,11 @@ def prepare_decesos_data(df: pd.DataFrame, date_column: str, movement: str) -> p
     else:
         work["DEPENDENCIA"] = "Sin dependencia"
 
-    work["FECHA_MOVIMIENTO"] = pd.to_datetime(work[date_column], dayfirst=True, errors="coerce")
+    work["FECHA_MOVIMIENTO"] = pd.to_datetime(
+        work[date_column],
+        dayfirst=True,
+        errors="coerce",
+    )
     work["ANIO_MOVIMIENTO"] = work["FECHA_MOVIMIENTO"].dt.year
     work["MES_MOVIMIENTO"] = work["FECHA_MOVIMIENTO"].dt.month
     work["PRIMA_NETA_VALOR"] = work["PRIMA NETA"].apply(parse_spanish_number)
@@ -179,15 +204,30 @@ def filter_movements(
         & ~work["PRODUCTO_NORMALIZADO"].isin(excluded)
     )
 
+    if movement == "ANULACION" and "CAUSA" in work.columns:
+        mask = mask & ~work["CAUSA"].apply(normalize_cause).eq("DEFUNCION")
+
     return work.loc[mask].copy()
 
 
-def aggregate_movements(detail: pd.DataFrame, amount_column: str, count_column: str) -> pd.DataFrame:
+def aggregate_movements(
+    detail: pd.DataFrame,
+    amount_column: str,
+    count_column: str,
+) -> pd.DataFrame:
     if detail.empty:
-        return pd.DataFrame(columns=[*GROUP_COLUMNS, "NOMBRE_AGENCIA", amount_column, count_column])
+        return pd.DataFrame(
+            columns=[
+                "AGENTE",
+                "DEPENDENCIA",
+                "NOMBRE_AGENCIA",
+                amount_column,
+                count_column,
+            ]
+        )
 
     return (
-        detail.groupby(list(GROUP_COLUMNS), dropna=False)
+        detail.groupby(["AGENTE", "DEPENDENCIA"], dropna=False)
         .agg(
             NOMBRE_AGENCIA=("NOMBRE_AGENCIA", first_non_empty),
             **{
@@ -196,24 +236,6 @@ def aggregate_movements(detail: pd.DataFrame, amount_column: str, count_column: 
             },
         )
         .reset_index()
-    )
-
-
-def empty_ranking() -> pd.DataFrame:
-    return pd.DataFrame(
-        columns=[
-            "RANKING",
-            "AGENTE",
-            "NOMBRE_AGENCIA",
-            "DEPENDENCIA",
-            "FACTURACION_ALTAS_BRUTAS",
-            "FACTURACION_ANULACIONES",
-            "FACTURACION_NETA",
-            "POLIZAS_ALTAS",
-            "POLIZAS_ANULADAS",
-            "POLIZAS_NETAS",
-            "PRIMA_MEDIA_NETA",
-        ]
     )
 
 
@@ -230,6 +252,7 @@ def calculate_facturacion_neta(
         "POLIALTA",
         "ALTA",
     )
+
     anulaciones_detail = filter_movements(
         anulaciones_df,
         ranking_date,
@@ -243,25 +266,43 @@ def calculate_facturacion_neta(
         "FACTURACION_ALTAS_BRUTAS",
         "POLIZAS_ALTAS",
     )
+
     anulaciones = aggregate_movements(
         anulaciones_detail,
         "FACTURACION_ANULACIONES",
         "POLIZAS_ANULADAS",
     )
+
     ranking = pd.merge(
         altas,
         anulaciones,
-        on=list(GROUP_COLUMNS),
+        on=["AGENTE", "DEPENDENCIA"],
         how="outer",
         suffixes=("_ALTAS", "_ANULACIONES"),
     )
 
     if ranking.empty:
-        return empty_ranking(), altas_detail, anulaciones_detail
+        empty = pd.DataFrame(
+            columns=[
+                "RANKING",
+                "AGENTE",
+                "NOMBRE_AGENCIA",
+                "DEPENDENCIA",
+                "FACTURACION_ALTAS_BRUTAS",
+                "FACTURACION_ANULACIONES",
+                "FACTURACION_NETA",
+                "POLIZAS_ALTAS",
+                "POLIZAS_ANULADAS",
+                "POLIZAS_NETAS",
+                "PRIMA_MEDIA_NETA",
+            ]
+        )
+        return empty, altas_detail, anulaciones_detail
 
     ranking["NOMBRE_AGENCIA"] = ranking["NOMBRE_AGENCIA_ALTAS"].combine_first(
         ranking["NOMBRE_AGENCIA_ANULACIONES"]
     )
+
     ranking["NOMBRE_AGENCIA"] = [
         name if not pd.isna(name) and str(name).strip() != "" else agent
         for name, agent in zip(ranking["NOMBRE_AGENCIA"], ranking["AGENTE"])
@@ -273,6 +314,7 @@ def calculate_facturacion_neta(
         "POLIZAS_ALTAS",
         "POLIZAS_ANULADAS",
     ]
+
     for column in numeric_columns:
         ranking[column] = ranking[column].fillna(0)
 
@@ -282,7 +324,10 @@ def calculate_facturacion_neta(
     ranking["POLIZAS_NETAS"] = ranking["POLIZAS_ALTAS"] - ranking["POLIZAS_ANULADAS"]
     ranking["PRIMA_MEDIA_NETA"] = [
         facturacion / polizas if polizas else 0.0
-        for facturacion, polizas in zip(ranking["FACTURACION_NETA"], ranking["POLIZAS_NETAS"])
+        for facturacion, polizas in zip(
+            ranking["FACTURACION_NETA"],
+            ranking["POLIZAS_NETAS"],
+        )
     ]
 
     ranking = ranking[
@@ -318,12 +363,14 @@ def build_sheet_summary(df: pd.DataFrame, file_name: str) -> pd.DataFrame:
         .reset_index(name="FILAS_LEIDAS")
         .rename(columns={"HOJA_ORIGEN": "HOJA"})
     )
+
     summary.insert(0, "ARCHIVO", file_name)
+
     return summary
 
 
 def format_euro(value: float) -> str:
-    return f"{value:,.2f} \u20ac".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{value:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 def detail_columns_for_display(detail: pd.DataFrame) -> list[str]:
@@ -333,6 +380,8 @@ def detail_columns_for_display(detail: pd.DataFrame) -> list[str]:
         "PRODUCTO",
         "POLIALTA",
         "FECHA BAJA",
+        "CAUSA",
+        "MOTIVO",
         "POLIZA",
         "MEDIADOR",
         "SECTOCOB",
@@ -344,6 +393,7 @@ def detail_columns_for_display(detail: pd.DataFrame) -> list[str]:
         "ANIO_MOVIMIENTO",
         "MES_MOVIMIENTO",
     ]
+
     return [column for column in columns if column in detail.columns]
 
 
@@ -363,6 +413,7 @@ def dataframe_to_excel(
             {"CAMPO": "ANIO", "VALOR": ranking_date.year},
             {"CAMPO": "MES_HASTA", "VALOR": ranking_date.month},
             {"CAMPO": "PRODUCTOS_EXCLUIDOS", "VALOR": ", ".join(excluded_products)},
+            {"CAMPO": "ANULACIONES_EXCLUIDAS_CAUSA", "VALOR": "DEFUNCION, DEFUNCIÓN"},
         ]
     )
 
@@ -396,12 +447,14 @@ def main() -> None:
     )
 
     col_upload_1, col_upload_2 = st.columns(2)
+
     with col_upload_1:
         uploaded_facturacion = st.file_uploader(
             "Sube FACTURACION_DECESOS.xls",
             type=["xls", "xlsx"],
             key="facturacion",
         )
+
     with col_upload_2:
         uploaded_anulaciones = st.file_uploader(
             "Sube FACTURACION_ANULACIONES_DECESOS.xls",
@@ -424,15 +477,24 @@ def main() -> None:
         st.warning("Alguno de los archivos esta vacio.")
         st.stop()
 
-    missing_facturacion = validate_columns(raw_facturacion_df, REQUIRED_FACTURACION_COLUMNS)
-    missing_anulaciones = validate_columns(raw_anulaciones_df, REQUIRED_ANULACIONES_COLUMNS)
+    missing_facturacion = validate_columns(
+        raw_facturacion_df,
+        REQUIRED_FACTURACION_COLUMNS,
+    )
+    missing_anulaciones = validate_columns(
+        raw_anulaciones_df,
+        REQUIRED_ANULACIONES_COLUMNS,
+    )
 
     if missing_facturacion or missing_anulaciones:
         messages = []
+
         if missing_facturacion:
             messages.append(f"Facturacion: {', '.join(missing_facturacion)}")
+
         if missing_anulaciones:
             messages.append(f"Anulaciones: {', '.join(missing_anulaciones)}")
+
         st.error("Faltan columnas obligatorias. " + " | ".join(messages))
         st.stop()
 

@@ -89,7 +89,7 @@ def normalize_text(value: object, default: str = "") -> str:
     return text
 
 
-def normalize_cause(value: object) -> str:
+def normalize_reason_text(value: object) -> str:
     if pd.isna(value):
         return ""
 
@@ -205,11 +205,20 @@ def filter_movements(
         & ~work["PRODUCTO_NORMALIZADO"].isin(excluded)
     )
 
-    if movement == "ANULACION" and "CAUSA" in work.columns:
-        mask = mask & ~work["CAUSA"].apply(normalize_cause).eq("DEFUNCION")
+    if movement == "ANULACION":
+    motivo = work["MOTIVO"].apply(normalize_reason_text) if "MOTIVO" in work.columns else ""
+    causa = work["CAUSA"].apply(normalize_reason_text) if "CAUSA" in work.columns else ""
 
-    return work.loc[mask].copy()
+    excluded_by_motivo = (
+        motivo.str.contains("DEFUNCION DEL ULTIMO O UNICO ASEGURADO", na=False)
+        | motivo.str.contains("DEFUNCION \\(QUEDAN MAS ASEGURADOS PERO NO LA QUIEREN\\)", na=False)
+        | motivo.str.contains("SINIESTRO TOTAL", na=False)
+        | motivo.str.contains("DEFUNCION", na=False)
+    )
 
+    excluded_by_causa = causa.str.contains("INDIVIDUAL POR SINIESTRO", na=False)
+
+    mask = mask & ~excluded_by_motivo & ~excluded_by_causa
 
 def aggregate_movements(
     detail: pd.DataFrame,

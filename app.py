@@ -147,8 +147,23 @@ def read_excel_all_sheets(uploaded_file) -> pd.DataFrame:
     for sheet_name, sheet_df in sheets.items():
         sheet_df = sheet_df.copy()
         sheet_df.columns = [str(column).strip() for column in sheet_df.columns]
+        sheet_df["ARCHIVO_ORIGEN"] = getattr(uploaded_file, "name", "archivo")
         sheet_df["HOJA_ORIGEN"] = sheet_name
         frames.append(sheet_df)
+
+    if not frames:
+        return pd.DataFrame()
+
+    return pd.concat(frames, ignore_index=True)
+
+
+def read_excel_many_files(uploaded_files) -> pd.DataFrame:
+    frames = []
+
+    for uploaded_file in uploaded_files or []:
+        file_df = read_excel_all_sheets(uploaded_file)
+        if not file_df.empty:
+            frames.append(file_df)
 
     if not frames:
         return pd.DataFrame()
@@ -553,16 +568,23 @@ def calculate_ranking(
 
 def build_sheet_summary(df: pd.DataFrame, file_name: str) -> pd.DataFrame:
     if "HOJA_ORIGEN" not in df.columns:
-        return pd.DataFrame(columns=["ARCHIVO", "HOJA", "FILAS_LEIDAS"])
+        return pd.DataFrame(columns=["TIPO_ARCHIVO", "ARCHIVO", "HOJA", "FILAS_LEIDAS"])
+
+    group_columns = ["HOJA_ORIGEN"]
+    if "ARCHIVO_ORIGEN" in df.columns:
+        group_columns = ["ARCHIVO_ORIGEN", "HOJA_ORIGEN"]
 
     summary = (
-        df.groupby("HOJA_ORIGEN", dropna=False)
+        df.groupby(group_columns, dropna=False)
         .size()
         .reset_index(name="FILAS_LEIDAS")
-        .rename(columns={"HOJA_ORIGEN": "HOJA"})
+        .rename(columns={"ARCHIVO_ORIGEN": "ARCHIVO", "HOJA_ORIGEN": "HOJA"})
     )
 
-    summary.insert(0, "ARCHIVO", file_name)
+    if "ARCHIVO" not in summary.columns:
+        summary.insert(0, "ARCHIVO", file_name)
+
+    summary.insert(0, "TIPO_ARCHIVO", file_name)
 
     return summary
 
@@ -629,6 +651,7 @@ def siniestros_columns_for_display(detail: pd.DataFrame) -> list[str]:
 
 def primas_columns_for_display(detail: pd.DataFrame) -> list[str]:
     columns = [
+        "ARCHIVO_ORIGEN",
         "HOJA_ORIGEN",
         "MOVIMIENTO_PRIMA",
         "MEDIADOR",
@@ -745,34 +768,36 @@ def main() -> None:
 
     with col_upload_4:
         uploaded_primas_emitidas = st.file_uploader(
-            "Sube PRIMAS_EMITIDAS.xls",
+            "Sube PRIMAS_EMITIDAS mensuales (.xls/.xlsx)",
             type=["xls", "xlsx"],
             key="primas_emitidas",
+            accept_multiple_files=True,
         )
 
     with col_upload_5:
         uploaded_primas_anuladas = st.file_uploader(
-            "Sube PRIMAS_ANULADAS.xls",
+            "Sube PRIMAS_ANULADAS mensuales (.xls/.xlsx)",
             type=["xls", "xlsx"],
             key="primas_anuladas",
+            accept_multiple_files=True,
         )
 
     if (
         uploaded_facturacion is None
         or uploaded_anulaciones is None
         or uploaded_siniestros is None
-        or uploaded_primas_emitidas is None
-        or uploaded_primas_anuladas is None
+        or not uploaded_primas_emitidas
+        or not uploaded_primas_anuladas
     ):
-        st.info("Sube los cinco archivos para calcular facturacion neta, primas netas y siniestralidad.")
+        st.info("Sube facturacion, anulaciones, siniestros y los archivos mensuales de primas emitidas/anuladas para calcular primas netas y siniestralidad.")
         st.stop()
 
     try:
         raw_facturacion_df = read_excel_all_sheets(uploaded_facturacion)
         raw_anulaciones_df = read_excel_all_sheets(uploaded_anulaciones)
         raw_siniestros_df = read_excel_all_sheets(uploaded_siniestros)
-        raw_primas_emitidas_df = read_excel_all_sheets(uploaded_primas_emitidas)
-        raw_primas_anuladas_df = read_excel_all_sheets(uploaded_primas_anuladas)
+        raw_primas_emitidas_df = read_excel_many_files(uploaded_primas_emitidas)
+        raw_primas_anuladas_df = read_excel_many_files(uploaded_primas_anuladas)
     except Exception as error:
         st.error(f"No he podido leer los archivos: {error}")
         st.stop()

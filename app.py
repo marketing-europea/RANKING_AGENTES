@@ -9,7 +9,11 @@ import streamlit as st
 
 
 DEFAULT_RANKING_DATE = date(2026, 1, 30)
+
 DEFAULT_EXCLUDED_PRODUCTS = ("D400", "D460")
+DEFAULT_EXCLUDED_SINIESTROS_PRODUCTS = ("D600", "D460")
+
+SINIESTRALIDAD_MAXIMA = 0.25
 
 REQUIRED_FACTURACION_COLUMNS = (
     "PRODUCTO",
@@ -26,6 +30,14 @@ REQUIRED_ANULACIONES_COLUMNS = (
     "MEDIADOR",
     "PRIMA NETA",
     "CAUSA",
+)
+
+REQUIRED_SINIESTROS_COLUMNS = (
+    "PRODUCTO",
+    "CODIMEDI",
+    "FECHDECL",
+    "PAGOSRZD",
+    "COSTESIN",
 )
 
 AGENCY_NAME_COLUMNS = (
@@ -233,6 +245,8 @@ def filter_movements(
         mask = mask & ~excluded_by_motivo & ~excluded_by_causa
 
     return work[mask].copy()
+
+
 def aggregate_movements(
     detail: pd.DataFrame,
     amount_column: str,
@@ -262,12 +276,77 @@ def aggregate_movements(
     )
 
 
-def calculate_facturacion_neta(
-    facturacion_df: pd.DataFrame,
-    anulaciones_df: pd.DataFrame,
+def prepare_siniestros_data(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
+
+    work["PRODUCTO_NORMALIZADO"] = work["PRODUCTO"].apply(normalize_product)
+    work["AGENTE"] = work["CODIMEDI"].apply(normalize_agent)
+
+    work["FECHA_SINIESTRO"] = pd.to_datetime(
+        work["FECHDECL"],
+        dayfirst=True,
+        errors="coerce",
+    )
+
+    work["ANIO_SINIESTRO"] = work["FECHA_SINIESTRO"].dt.year
+    work["MES_SINIESTRO"] = work["FECHA_SINIESTRO"].dt.month
+
+    work["PAGOSRZD_VALOR"] = work["PAGOSRZD"].apply(parse_spanish_number)
+    work["COSTESIN_VALOR"] = work["COSTESIN"].apply(parse_spanish_number)
+
+    work["IMPORTE_SINIESTRO"] = (
+        work["PAGOSRZD_VALOR"] + work["COSTESIN_VALOR"]
+    )
+
+    return work
+
+
+def filter_siniestros(
+    df: pd.DataFrame,
     ranking_date: date,
     excluded_products: list[str],
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> pd.DataFrame:
+    work = prepare_siniestros_data(df)
+    excluded = {normalize_product(product) for product in excluded_products}
+
+    mask = (
+        work["FECHA_SINIESTRO"].notna()
+        & work["ANIO_SINIESTRO"].eq(ranking_date.year)
+        & work["MES_SINIESTRO"].le(ranking_date.month)
+        & ~work["PRODUCTO_NORMALIZADO"].isin(excluded)
+    )
+
+    return work[mask].copy()
+
+
+def aggregate_siniestros(detail: pd.DataFrame) -> pd.DataFrame:
+    if detail.empty:
+        return pd.DataFrame(
+            columns=[
+                "AGENTE",
+                "IMPORTE_SINIESTROS",
+                "NUM_SINIESTROS",
+            ]
+        )
+
+    return (
+        detail.groupby("AGENTE", dropna=False)
+        .agg(
+            IMPORTE_SINIESTROS=("IMPORTE_SINIESTRO", "sum"),
+            NUM_SINIESTROS=("NUMESINI", "count") if "NUMESINI" in detail.columns else ("IMPORTE_SINIESTRO", "count"),
+        )
+        .reset_index()
+    )
+
+
+def calculate_ranking(
+    facturacion_df: pd.DataFrame,
+    anulaciones_df: pd.DataFrame,
+    siniestros_df: pd.DataFrame,
+    ranking_date: date,
+    excluded_products: list[str],
+    excluded_siniestros_products: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     altas_detail = filter_movements(
         facturacion_df,
         ranking_date,
@@ -284,6 +363,12 @@ def calculate_facturacion_neta(
         "ANULACION",
     )
 
+    siniestros_detail = filter_siniestros(
+        siniestros_df,
+        ranking_date,
+        excluded_siniestros_products,
+    )
+
     altas = aggregate_movements(
         altas_detail,
         "FACTURACION_ALTAS_BRUTAS",
@@ -295,6 +380,8 @@ def calculate_facturacion_neta(
         "FACTURACION_ANULACIONES",
         "POLIZAS_ANULADAS",
     )
+
+    siniestros = aggregate_siniestros(siniestros_detail)
 
     ranking = pd.merge(
         altas,
@@ -314,13 +401,17 @@ def calculate_facturacion_neta(
                 "FACTURACION_ALTAS_BRUTAS",
                 "FACTURACION_ANULACIONES",
                 "FACTURACION_NETA",
+                "IMPORTE_SINIESTROS",
+                "SINIESTRALIDAD",
+                "CUMPLE_SINIESTRALIDAD",
                 "POLIZAS_ALTAS",
                 "POLIZAS_ANULADAS",
                 "POLIZAS_NETAS",
+                "NUM_SINIESTROS",
                 "PRIMA_MEDIA_NETA",
             ]
         )
-        return empty, altas_detail, anulaciones_detail
+        return empty, altas_detail, anulaciones_detail, siniestros_detail
 
     ranking["NOMBRE_AGENCIA"] = ranking["NOMBRE_AGENCIA_ALTAS"].combine_first(
         ranking["NOMBRE_AGENCIA_ANULACIONES"]
@@ -331,20 +422,34 @@ def calculate_facturacion_neta(
         for name, agent in zip(ranking["NOMBRE_AGENCIA"], ranking["AGENTE"])
     ]
 
+    ranking = pd.merge(
+        ranking,
+        siniestros,
+        on="AGENTE",
+        how="left",
+    )
+
     numeric_columns = [
         "FACTURACION_ALTAS_BRUTAS",
         "FACTURACION_ANULACIONES",
         "POLIZAS_ALTAS",
         "POLIZAS_ANULADAS",
+        "IMPORTE_SINIESTROS",
+        "NUM_SINIESTROS",
     ]
 
     for column in numeric_columns:
-        ranking[column] = ranking[column].fillna(0)
+        if column in ranking.columns:
+            ranking[column] = ranking[column].fillna(0)
 
     ranking["FACTURACION_NETA"] = (
         ranking["FACTURACION_ALTAS_BRUTAS"] - ranking["FACTURACION_ANULACIONES"]
     )
-    ranking["POLIZAS_NETAS"] = ranking["POLIZAS_ALTAS"] - ranking["POLIZAS_ANULADAS"]
+
+    ranking["POLIZAS_NETAS"] = (
+        ranking["POLIZAS_ALTAS"] - ranking["POLIZAS_ANULADAS"]
+    )
+
     ranking["PRIMA_MEDIA_NETA"] = [
         facturacion / polizas if polizas else 0.0
         for facturacion, polizas in zip(
@@ -352,6 +457,16 @@ def calculate_facturacion_neta(
             ranking["POLIZAS_NETAS"],
         )
     ]
+
+    ranking["SINIESTRALIDAD"] = [
+        importe_siniestros / facturacion_neta if facturacion_neta > 0 else 0.0
+        for importe_siniestros, facturacion_neta in zip(
+            ranking["IMPORTE_SINIESTROS"],
+            ranking["FACTURACION_NETA"],
+        )
+    ]
+
+    ranking["CUMPLE_SINIESTRALIDAD"] = ranking["SINIESTRALIDAD"] < SINIESTRALIDAD_MAXIMA
 
     ranking = ranking[
         [
@@ -361,19 +476,23 @@ def calculate_facturacion_neta(
             "FACTURACION_ALTAS_BRUTAS",
             "FACTURACION_ANULACIONES",
             "FACTURACION_NETA",
+            "IMPORTE_SINIESTROS",
+            "SINIESTRALIDAD",
+            "CUMPLE_SINIESTRALIDAD",
             "POLIZAS_ALTAS",
             "POLIZAS_ANULADAS",
             "POLIZAS_NETAS",
+            "NUM_SINIESTROS",
             "PRIMA_MEDIA_NETA",
         ]
     ].sort_values(
-        ["FACTURACION_NETA", "FACTURACION_ALTAS_BRUTAS", "AGENTE", "DEPENDENCIA"],
-        ascending=[False, False, True, True],
+        ["FACTURACION_NETA", "SINIESTRALIDAD", "AGENTE", "DEPENDENCIA"],
+        ascending=[False, True, True, True],
     )
 
     ranking.insert(0, "RANKING", range(1, len(ranking) + 1))
 
-    return ranking, altas_detail, anulaciones_detail
+    return ranking, altas_detail, anulaciones_detail, siniestros_detail
 
 
 def build_sheet_summary(df: pd.DataFrame, file_name: str) -> pd.DataFrame:
@@ -394,6 +513,10 @@ def build_sheet_summary(df: pd.DataFrame, file_name: str) -> pd.DataFrame:
 
 def format_euro(value: float) -> str:
     return f"{value:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def format_percent(value: float) -> str:
+    return f"{value:.2%}".replace(".", ",")
 
 
 def detail_columns_for_display(detail: pd.DataFrame) -> list[str]:
@@ -422,13 +545,41 @@ def detail_columns_for_display(detail: pd.DataFrame) -> list[str]:
     return [column for column in columns if column in detail.columns]
 
 
+def siniestros_columns_for_display(detail: pd.DataFrame) -> list[str]:
+    columns = [
+        "HOJA_ORIGEN",
+        "PRODUCTO",
+        "CODIMEDI",
+        "AGENTE",
+        "FECHDECL",
+        "FECHA_SINIESTRO",
+        "ANIO_SINIESTRO",
+        "MES_SINIESTRO",
+        "NUMESINI",
+        "POLIZSEC",
+        "ESTADO",
+        "MOTIVO",
+        "COBERTURA",
+        "NATURALEZA",
+        "PAGOSRZD",
+        "PAGOSRZD_VALOR",
+        "COSTESIN",
+        "COSTESIN_VALOR",
+        "IMPORTE_SINIESTRO",
+    ]
+
+    return [column for column in columns if column in detail.columns]
+
+
 def dataframe_to_excel(
     ranking: pd.DataFrame,
     altas_detail: pd.DataFrame,
     anulaciones_detail: pd.DataFrame,
+    siniestros_detail: pd.DataFrame,
     sheet_summary: pd.DataFrame,
     ranking_date: date,
     excluded_products: list[str],
+    excluded_siniestros_products: list[str],
 ) -> bytes:
     output = BytesIO()
 
@@ -437,9 +588,13 @@ def dataframe_to_excel(
             {"CAMPO": "FECHA_RANKING", "VALOR": ranking_date.strftime("%d/%m/%Y")},
             {"CAMPO": "ANIO", "VALOR": ranking_date.year},
             {"CAMPO": "MES_HASTA", "VALOR": ranking_date.month},
-            {"CAMPO": "PRODUCTOS_EXCLUIDOS", "VALOR": ", ".join(excluded_products)},
+            {"CAMPO": "PRODUCTOS_EXCLUIDOS_ALTAS_ANULACIONES", "VALOR": ", ".join(excluded_products)},
+            {"CAMPO": "PRODUCTOS_EXCLUIDOS_SINIESTROS", "VALOR": ", ".join(excluded_siniestros_products)},
             {"CAMPO": "FECHA_ANULACIONES", "VALOR": "FECHA EMISION"},
-            {"CAMPO": "ANULACIONES_EXCLUIDAS_CAUSA", "VALOR": "DEFUNCION, DEFUNCIÓN"},
+            {"CAMPO": "FECHA_SINIESTROS", "VALOR": "FECHDECL"},
+            {"CAMPO": "SINIESTRALIDAD_MAXIMA", "VALOR": "25%"},
+            {"CAMPO": "ANULACIONES_EXCLUIDAS_CAUSA", "VALOR": "DEFUNCION, DEFUNCIÓN, INDIVIDUAL POR SINIESTRO"},
+            {"CAMPO": "ANULACIONES_EXCLUIDAS_MOTIVO", "VALOR": "DEFUNCION, SINIESTRO TOTAL"},
         ]
     )
 
@@ -457,6 +612,11 @@ def dataframe_to_excel(
             index=False,
             sheet_name="DETALLE_ANULACIONES",
         )
+        siniestros_detail[siniestros_columns_for_display(siniestros_detail)].to_excel(
+            writer,
+            index=False,
+            sheet_name="DETALLE_SINIESTROS",
+        )
 
     return output.getvalue()
 
@@ -472,7 +632,7 @@ def main() -> None:
         format="DD/MM/YYYY",
     )
 
-    col_upload_1, col_upload_2 = st.columns(2)
+    col_upload_1, col_upload_2, col_upload_3 = st.columns(3)
 
     with col_upload_1:
         uploaded_facturacion = st.file_uploader(
@@ -488,18 +648,26 @@ def main() -> None:
             key="anulaciones",
         )
 
-    if uploaded_facturacion is None or uploaded_anulaciones is None:
-        st.info("Sube los dos archivos para calcular altas, anulaciones y facturacion neta.")
+    with col_upload_3:
+        uploaded_siniestros = st.file_uploader(
+            "Sube SINIESTROS_DECESOS.xls",
+            type=["xls", "xlsx"],
+            key="siniestros",
+        )
+
+    if uploaded_facturacion is None or uploaded_anulaciones is None or uploaded_siniestros is None:
+        st.info("Sube los tres archivos para calcular facturacion neta y siniestralidad.")
         st.stop()
 
     try:
         raw_facturacion_df = read_excel_all_sheets(uploaded_facturacion)
         raw_anulaciones_df = read_excel_all_sheets(uploaded_anulaciones)
+        raw_siniestros_df = read_excel_all_sheets(uploaded_siniestros)
     except Exception as error:
         st.error(f"No he podido leer los archivos: {error}")
         st.stop()
 
-    if raw_facturacion_df.empty or raw_anulaciones_df.empty:
+    if raw_facturacion_df.empty or raw_anulaciones_df.empty or raw_siniestros_df.empty:
         st.warning("Alguno de los archivos esta vacio.")
         st.stop()
 
@@ -511,8 +679,12 @@ def main() -> None:
         raw_anulaciones_df,
         REQUIRED_ANULACIONES_COLUMNS,
     )
+    missing_siniestros = validate_columns(
+        raw_siniestros_df,
+        REQUIRED_SINIESTROS_COLUMNS,
+    )
 
-    if missing_facturacion or missing_anulaciones:
+    if missing_facturacion or missing_anulaciones or missing_siniestros:
         messages = []
 
         if missing_facturacion:
@@ -521,6 +693,9 @@ def main() -> None:
         if missing_anulaciones:
             messages.append(f"Anulaciones: {', '.join(missing_anulaciones)}")
 
+        if missing_siniestros:
+            messages.append(f"Siniestros: {', '.join(missing_siniestros)}")
+
         st.error("Faltan columnas obligatorias. " + " | ".join(messages))
         st.stop()
 
@@ -528,6 +703,7 @@ def main() -> None:
         [
             build_sheet_summary(raw_facturacion_df, "FACTURACION_DECESOS"),
             build_sheet_summary(raw_anulaciones_df, "FACTURACION_ANULACIONES_DECESOS"),
+            build_sheet_summary(raw_siniestros_df, "SINIESTROS_DECESOS"),
         ],
         ignore_index=True,
     )
@@ -554,34 +730,62 @@ def main() -> None:
     ]
 
     excluded_products = st.multiselect(
-        "Productos excluidos",
+        "Productos excluidos en altas y anulaciones",
         product_options,
         default=default_excluded,
     )
 
-    ranking, altas_detail, anulaciones_detail = calculate_facturacion_neta(
+    siniestros_product_options = sorted(
+        raw_siniestros_df["PRODUCTO"]
+        .dropna()
+        .map(normalize_product)
+        .unique()
+        .tolist()
+    )
+
+    default_excluded_siniestros = [
+        product for product in DEFAULT_EXCLUDED_SINIESTROS_PRODUCTS
+        if product in siniestros_product_options
+    ]
+
+    excluded_siniestros_products = st.multiselect(
+        "Productos excluidos en siniestros",
+        siniestros_product_options,
+        default=default_excluded_siniestros,
+    )
+
+    ranking, altas_detail, anulaciones_detail, siniestros_detail = calculate_ranking(
         raw_facturacion_df,
         raw_anulaciones_df,
+        raw_siniestros_df,
         ranking_date,
         excluded_products,
+        excluded_siniestros_products,
     )
 
-    total_altas = (
-        float(ranking["FACTURACION_ALTAS_BRUTAS"].sum()) if not ranking.empty else 0.0
-    )
-    total_anulaciones = (
-        float(ranking["FACTURACION_ANULACIONES"].sum()) if not ranking.empty else 0.0
-    )
+    total_altas = float(ranking["FACTURACION_ALTAS_BRUTAS"].sum()) if not ranking.empty else 0.0
+    total_anulaciones = float(ranking["FACTURACION_ANULACIONES"].sum()) if not ranking.empty else 0.0
     total_neta = float(ranking["FACTURACION_NETA"].sum()) if not ranking.empty else 0.0
+    total_siniestros = float(ranking["IMPORTE_SINIESTROS"].sum()) if not ranking.empty else 0.0
     total_polizas_netas = int(ranking["POLIZAS_NETAS"].sum()) if not ranking.empty else 0
 
-    col1, col2, col3, col4 = st.columns(4)
+    siniestralidad_total = total_siniestros / total_neta if total_neta > 0 else 0.0
+
+    col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Facturacion altas brutas", format_euro(total_altas))
     col2.metric("Facturacion anulaciones", format_euro(total_anulaciones))
     col3.metric("Facturacion neta", format_euro(total_neta))
-    col4.metric("Polizas netas", f"{total_polizas_netas:,}".replace(",", "."))
+    col4.metric("Importe siniestros", format_euro(total_siniestros))
+    col5.metric("Siniestralidad total", format_percent(siniestralidad_total))
 
-    st.subheader("Ranking facturacion neta")
+    col6, col7 = st.columns(2)
+    col6.metric("Polizas netas", f"{total_polizas_netas:,}".replace(",", "."))
+    col7.metric(
+        "Cumple siniestralidad global",
+        "SI" if siniestralidad_total < SINIESTRALIDAD_MAXIMA else "NO",
+    )
+
+    st.subheader("Ranking facturacion neta con siniestralidad")
 
     if ranking.empty:
         st.info("No hay datos para los filtros seleccionados.")
@@ -592,6 +796,8 @@ def main() -> None:
                     "FACTURACION_ALTAS_BRUTAS": lambda value: format_euro(float(value)),
                     "FACTURACION_ANULACIONES": lambda value: format_euro(float(value)),
                     "FACTURACION_NETA": lambda value: format_euro(float(value)),
+                    "IMPORTE_SINIESTROS": lambda value: format_euro(float(value)),
+                    "SINIESTRALIDAD": lambda value: format_percent(float(value)),
                     "PRIMA_MEDIA_NETA": lambda value: format_euro(float(value)),
                 }
             ),
@@ -617,19 +823,34 @@ def main() -> None:
             hide_index=True,
         )
 
+    with st.expander("Detalle de siniestros incluidos"):
+        st.dataframe(
+            siniestros_detail[siniestros_columns_for_display(siniestros_detail)].style.format(
+                {
+                    "PAGOSRZD_VALOR": lambda value: format_euro(float(value)),
+                    "COSTESIN_VALOR": lambda value: format_euro(float(value)),
+                    "IMPORTE_SINIESTRO": lambda value: format_euro(float(value)),
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
     excel_bytes = dataframe_to_excel(
         ranking,
         altas_detail,
         anulaciones_detail,
+        siniestros_detail,
         sheet_summary,
         ranking_date,
         excluded_products,
+        excluded_siniestros_products,
     )
 
     st.download_button(
-        "Descargar ranking neto en Excel",
+        "Descargar ranking neto con siniestralidad en Excel",
         data=excel_bytes,
-        file_name=f"ranking_decesos_facturacion_neta_{ranking_date:%Y%m%d}.xlsx",
+        file_name=f"ranking_decesos_facturacion_neta_siniestralidad_{ranking_date:%Y%m%d}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 

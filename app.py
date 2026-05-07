@@ -11,13 +11,30 @@ import streamlit as st
 DEFAULT_RANKING_DATE = date(2026, 1, 30)
 DEFAULT_EXCLUDED_PRODUCTS = ("D400", "D460")
 
-REQUIRED_COLUMNS = (
+REQUIRED_FACTURACION_COLUMNS = (
     "PRODUCTO",
     "POLIALTA",
     "POLIZA",
     "MEDIADOR",
     "PRIMA NETA",
 )
+REQUIRED_ANULACIONES_COLUMNS = (
+    "PRODUCTO",
+    "FECHA BAJA",
+    "POLIZA",
+    "MEDIADOR",
+    "PRIMA NETA",
+)
+AGENCY_NAME_COLUMNS = (
+    "NOMBRE AGENCIA",
+    "NOMBRE_AGENCIA",
+    "AGENCIA",
+    "NOMBRE MEDIADOR",
+    "NOM MEDIADOR",
+    "MEDIADOR NOMBRE",
+)
+DEPENDENCY_COLUMNS = ("SECTOCOB", "SECTOR", "DEPENDENCIA")
+GROUP_COLUMNS = ("AGENTE", "DEPENDENCIA")
 
 
 def parse_spanish_number(value: object) -> float:
@@ -65,6 +82,33 @@ def normalize_agent(value: object) -> str:
     return text
 
 
+def normalize_text(value: object, default: str) -> str:
+    if pd.isna(value) or str(value).strip() == "":
+        return default
+
+    text = str(value).strip()
+    if re.fullmatch(r"\d+\.0", text):
+        text = text[:-2]
+
+    return text
+
+
+def first_existing_column(columns: list[str] | pd.Index, candidates: tuple[str, ...]) -> str | None:
+    normalized = {str(column).strip().upper(): str(column).strip() for column in columns}
+    for candidate in candidates:
+        column = normalized.get(candidate.upper())
+        if column is not None:
+            return column
+    return None
+
+
+def first_non_empty(values: pd.Series) -> str:
+    for value in values:
+        if not pd.isna(value) and str(value).strip() != "":
+            return str(value).strip()
+    return ""
+
+
 def read_excel_all_sheets(uploaded_file) -> pd.DataFrame:
     sheets = pd.read_excel(uploaded_file, sheet_name=None, dtype=str)
     frames = []
@@ -81,66 +125,233 @@ def read_excel_all_sheets(uploaded_file) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-def validate_columns(df: pd.DataFrame) -> list[str]:
-    return [column for column in REQUIRED_COLUMNS if column not in df.columns]
+def validate_columns(df: pd.DataFrame, required_columns: tuple[str, ...]) -> list[str]:
+    return [column for column in required_columns if column not in df.columns]
 
 
-def prepare_decesos_data(df: pd.DataFrame) -> pd.DataFrame:
+def prepare_decesos_data(df: pd.DataFrame, date_column: str, movement: str) -> pd.DataFrame:
     work = df.copy()
+    agency_name_column = first_existing_column(work.columns, AGENCY_NAME_COLUMNS)
+    dependency_column = first_existing_column(work.columns, DEPENDENCY_COLUMNS)
 
+    work["MOVIMIENTO"] = movement
     work["PRODUCTO_NORMALIZADO"] = work["PRODUCTO"].apply(normalize_product)
     work["AGENTE"] = work["MEDIADOR"].apply(normalize_agent)
-    work["FECHA_ALTA"] = pd.to_datetime(work["POLIALTA"], dayfirst=True, errors="coerce")
-    work["ANIO_ALTA"] = work["FECHA_ALTA"].dt.year
-    work["MES_ALTA"] = work["FECHA_ALTA"].dt.month
+
+    if agency_name_column:
+        agency_names = work[agency_name_column].apply(lambda value: normalize_text(value, ""))
+        work["NOMBRE_AGENCIA"] = [
+            agency_name if agency_name else agent
+            for agency_name, agent in zip(agency_names, work["AGENTE"])
+        ]
+    else:
+        work["NOMBRE_AGENCIA"] = work["AGENTE"]
+
+    if dependency_column:
+        work["DEPENDENCIA"] = work[dependency_column].apply(
+            lambda value: normalize_text(value, "Sin dependencia")
+        )
+    else:
+        work["DEPENDENCIA"] = "Sin dependencia"
+
+    work["FECHA_MOVIMIENTO"] = pd.to_datetime(work[date_column], dayfirst=True, errors="coerce")
+    work["ANIO_MOVIMIENTO"] = work["FECHA_MOVIMIENTO"].dt.year
+    work["MES_MOVIMIENTO"] = work["FECHA_MOVIMIENTO"].dt.month
     work["PRIMA_NETA_VALOR"] = work["PRIMA NETA"].apply(parse_spanish_number)
 
     return work
 
 
-def calculate_facturacion_altas_brutas(
+def filter_movements(
     df: pd.DataFrame,
     ranking_date: date,
     excluded_products: list[str],
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    work = prepare_decesos_data(df)
+    date_column: str,
+    movement: str,
+) -> pd.DataFrame:
+    work = prepare_decesos_data(df, date_column, movement)
     excluded = {normalize_product(product) for product in excluded_products}
 
     mask = (
-        work["FECHA_ALTA"].notna()
-        & work["ANIO_ALTA"].eq(ranking_date.year)
-        & work["MES_ALTA"].le(ranking_date.month)
+        work["FECHA_MOVIMIENTO"].notna()
+        & work["ANIO_MOVIMIENTO"].eq(ranking_date.year)
+        & work["MES_MOVIMIENTO"].le(ranking_date.month)
         & ~work["PRODUCTO_NORMALIZADO"].isin(excluded)
     )
 
-    detail = work.loc[mask].copy()
+    return work.loc[mask].copy()
 
-    ranking = (
-        detail.groupby("AGENTE", dropna=False)
+
+def aggregate_movements(detail: pd.DataFrame, amount_column: str, count_column: str) -> pd.DataFrame:
+    if detail.empty:
+        return pd.DataFrame(columns=[*GROUP_COLUMNS, "NOMBRE_AGENCIA", amount_column, count_column])
+
+    return (
+        detail.groupby(list(GROUP_COLUMNS), dropna=False)
         .agg(
-            FACTURACION_ALTAS_BRUTAS=("PRIMA_NETA_VALOR", "sum"),
-            POLIZAS_ALTAS=("POLIZA", "count"),
-            PRIMA_MEDIA=("PRIMA_NETA_VALOR", "mean"),
+            NOMBRE_AGENCIA=("NOMBRE_AGENCIA", first_non_empty),
+            **{
+                amount_column: ("PRIMA_NETA_VALOR", "sum"),
+                count_column: ("POLIZA", "count"),
+            },
         )
         .reset_index()
-        .sort_values(
-            ["FACTURACION_ALTAS_BRUTAS", "POLIZAS_ALTAS", "AGENTE"],
-            ascending=[False, False, True],
-        )
+    )
+
+
+def empty_ranking() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "RANKING",
+            "AGENTE",
+            "NOMBRE_AGENCIA",
+            "DEPENDENCIA",
+            "FACTURACION_ALTAS_BRUTAS",
+            "FACTURACION_ANULACIONES",
+            "FACTURACION_NETA",
+            "POLIZAS_ALTAS",
+            "POLIZAS_ANULADAS",
+            "POLIZAS_NETAS",
+            "PRIMA_MEDIA_NETA",
+        ]
+    )
+
+
+def calculate_facturacion_neta(
+    facturacion_df: pd.DataFrame,
+    anulaciones_df: pd.DataFrame,
+    ranking_date: date,
+    excluded_products: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    altas_detail = filter_movements(
+        facturacion_df,
+        ranking_date,
+        excluded_products,
+        "POLIALTA",
+        "ALTA",
+    )
+    anulaciones_detail = filter_movements(
+        anulaciones_df,
+        ranking_date,
+        excluded_products,
+        "FECHA BAJA",
+        "ANULACION",
+    )
+
+    altas = aggregate_movements(
+        altas_detail,
+        "FACTURACION_ALTAS_BRUTAS",
+        "POLIZAS_ALTAS",
+    )
+    anulaciones = aggregate_movements(
+        anulaciones_detail,
+        "FACTURACION_ANULACIONES",
+        "POLIZAS_ANULADAS",
+    )
+    ranking = pd.merge(
+        altas,
+        anulaciones,
+        on=list(GROUP_COLUMNS),
+        how="outer",
+        suffixes=("_ALTAS", "_ANULACIONES"),
+    )
+
+    if ranking.empty:
+        return empty_ranking(), altas_detail, anulaciones_detail
+
+    ranking["NOMBRE_AGENCIA"] = ranking["NOMBRE_AGENCIA_ALTAS"].combine_first(
+        ranking["NOMBRE_AGENCIA_ANULACIONES"]
+    )
+    ranking["NOMBRE_AGENCIA"] = [
+        name if not pd.isna(name) and str(name).strip() != "" else agent
+        for name, agent in zip(ranking["NOMBRE_AGENCIA"], ranking["AGENTE"])
+    ]
+
+    numeric_columns = [
+        "FACTURACION_ALTAS_BRUTAS",
+        "FACTURACION_ANULACIONES",
+        "POLIZAS_ALTAS",
+        "POLIZAS_ANULADAS",
+    ]
+    for column in numeric_columns:
+        ranking[column] = ranking[column].fillna(0)
+
+    ranking["FACTURACION_NETA"] = (
+        ranking["FACTURACION_ALTAS_BRUTAS"] - ranking["FACTURACION_ANULACIONES"]
+    )
+    ranking["POLIZAS_NETAS"] = ranking["POLIZAS_ALTAS"] - ranking["POLIZAS_ANULADAS"]
+    ranking["PRIMA_MEDIA_NETA"] = [
+        facturacion / polizas if polizas else 0.0
+        for facturacion, polizas in zip(ranking["FACTURACION_NETA"], ranking["POLIZAS_NETAS"])
+    ]
+
+    ranking = ranking[
+        [
+            "AGENTE",
+            "NOMBRE_AGENCIA",
+            "DEPENDENCIA",
+            "FACTURACION_ALTAS_BRUTAS",
+            "FACTURACION_ANULACIONES",
+            "FACTURACION_NETA",
+            "POLIZAS_ALTAS",
+            "POLIZAS_ANULADAS",
+            "POLIZAS_NETAS",
+            "PRIMA_MEDIA_NETA",
+        ]
+    ].sort_values(
+        ["FACTURACION_NETA", "FACTURACION_ALTAS_BRUTAS", "AGENTE", "DEPENDENCIA"],
+        ascending=[False, False, True, True],
     )
 
     ranking.insert(0, "RANKING", range(1, len(ranking) + 1))
 
-    return ranking, detail
+    return ranking, altas_detail, anulaciones_detail
+
+
+def build_sheet_summary(df: pd.DataFrame, file_name: str) -> pd.DataFrame:
+    if "HOJA_ORIGEN" not in df.columns:
+        return pd.DataFrame(columns=["ARCHIVO", "HOJA", "FILAS_LEIDAS"])
+
+    summary = (
+        df.groupby("HOJA_ORIGEN", dropna=False)
+        .size()
+        .reset_index(name="FILAS_LEIDAS")
+        .rename(columns={"HOJA_ORIGEN": "HOJA"})
+    )
+    summary.insert(0, "ARCHIVO", file_name)
+    return summary
 
 
 def format_euro(value: float) -> str:
-    return f"{value:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{value:,.2f} \u20ac".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def detail_columns_for_display(detail: pd.DataFrame) -> list[str]:
+    columns = [
+        "HOJA_ORIGEN",
+        "MOVIMIENTO",
+        "PRODUCTO",
+        "POLIALTA",
+        "FECHA BAJA",
+        "POLIZA",
+        "MEDIADOR",
+        "SECTOCOB",
+        "SECTOR",
+        "NOMBRE_AGENCIA",
+        "DEPENDENCIA",
+        "PRIMA NETA",
+        "PRIMA_NETA_VALOR",
+        "ANIO_MOVIMIENTO",
+        "MES_MOVIMIENTO",
+    ]
+    return [column for column in columns if column in detail.columns]
 
 
 def dataframe_to_excel(
     ranking: pd.DataFrame,
-    detail: pd.DataFrame,
+    altas_detail: pd.DataFrame,
+    anulaciones_detail: pd.DataFrame,
+    sheet_summary: pd.DataFrame,
     ranking_date: date,
     excluded_products: list[str],
 ) -> bytes:
@@ -155,23 +366,20 @@ def dataframe_to_excel(
         ]
     )
 
-    detail_columns = [
-        "HOJA_ORIGEN",
-        "PRODUCTO",
-        "POLIALTA",
-        "POLIZA",
-        "MEDIADOR",
-        "PRIMA NETA",
-        "PRIMA_NETA_VALOR",
-        "ANIO_ALTA",
-        "MES_ALTA",
-    ]
-    detail_columns = [column for column in detail_columns if column in detail.columns]
-
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         parametros.to_excel(writer, index=False, sheet_name="PARAMETROS")
-        ranking.to_excel(writer, index=False, sheet_name="RANKING")
-        detail[detail_columns].to_excel(writer, index=False, sheet_name="DETALLE_ALTAS")
+        sheet_summary.to_excel(writer, index=False, sheet_name="COMPROBACION_HOJAS")
+        ranking.to_excel(writer, index=False, sheet_name="RANKING_NETO")
+        altas_detail[detail_columns_for_display(altas_detail)].to_excel(
+            writer,
+            index=False,
+            sheet_name="DETALLE_ALTAS",
+        )
+        anulaciones_detail[detail_columns_for_display(anulaciones_detail)].to_excel(
+            writer,
+            index=False,
+            sheet_name="DETALLE_ANULACIONES",
+        )
 
     return output.getvalue()
 
@@ -187,33 +395,70 @@ def main() -> None:
         format="DD/MM/YYYY",
     )
 
-    uploaded_file = st.file_uploader(
-        "Sube FACTURACION_DECESOS.xls",
-        type=["xls", "xlsx"],
-    )
+    col_upload_1, col_upload_2 = st.columns(2)
+    with col_upload_1:
+        uploaded_facturacion = st.file_uploader(
+            "Sube FACTURACION_DECESOS.xls",
+            type=["xls", "xlsx"],
+            key="facturacion",
+        )
+    with col_upload_2:
+        uploaded_anulaciones = st.file_uploader(
+            "Sube FACTURACION_ANULACIONES_DECESOS.xls",
+            type=["xls", "xlsx"],
+            key="anulaciones",
+        )
 
-    if uploaded_file is None:
-        st.info("Sube el archivo FACTURACION_DECESOS.xls para calcular el ranking.")
+    if uploaded_facturacion is None or uploaded_anulaciones is None:
+        st.info("Sube los dos archivos para calcular altas, anulaciones y facturacion neta.")
         st.stop()
 
     try:
-        raw_df = read_excel_all_sheets(uploaded_file)
+        raw_facturacion_df = read_excel_all_sheets(uploaded_facturacion)
+        raw_anulaciones_df = read_excel_all_sheets(uploaded_anulaciones)
     except Exception as error:
-        st.error(f"No he podido leer el archivo: {error}")
+        st.error(f"No he podido leer los archivos: {error}")
         st.stop()
 
-    if raw_df.empty:
-        st.warning("El archivo esta vacio.")
+    if raw_facturacion_df.empty or raw_anulaciones_df.empty:
+        st.warning("Alguno de los archivos esta vacio.")
         st.stop()
 
-    missing_columns = validate_columns(raw_df)
+    missing_facturacion = validate_columns(raw_facturacion_df, REQUIRED_FACTURACION_COLUMNS)
+    missing_anulaciones = validate_columns(raw_anulaciones_df, REQUIRED_ANULACIONES_COLUMNS)
 
-    if missing_columns:
-        st.error(f"Faltan columnas obligatorias: {', '.join(missing_columns)}")
+    if missing_facturacion or missing_anulaciones:
+        messages = []
+        if missing_facturacion:
+            messages.append(f"Facturacion: {', '.join(missing_facturacion)}")
+        if missing_anulaciones:
+            messages.append(f"Anulaciones: {', '.join(missing_anulaciones)}")
+        st.error("Faltan columnas obligatorias. " + " | ".join(messages))
         st.stop()
+
+    sheet_summary = pd.concat(
+        [
+            build_sheet_summary(raw_facturacion_df, "FACTURACION_DECESOS"),
+            build_sheet_summary(raw_anulaciones_df, "FACTURACION_ANULACIONES_DECESOS"),
+        ],
+        ignore_index=True,
+    )
+
+    with st.expander("Comprobacion de hojas leidas", expanded=True):
+        st.dataframe(sheet_summary, use_container_width=True, hide_index=True)
 
     product_options = sorted(
-        raw_df["PRODUCTO"].dropna().map(normalize_product).unique().tolist()
+        pd.concat(
+            [
+                raw_facturacion_df["PRODUCTO"],
+                raw_anulaciones_df["PRODUCTO"],
+            ],
+            ignore_index=True,
+        )
+        .dropna()
+        .map(normalize_product)
+        .unique()
+        .tolist()
     )
 
     default_excluded = [
@@ -226,25 +471,29 @@ def main() -> None:
         default=default_excluded,
     )
 
-    ranking, detail = calculate_facturacion_altas_brutas(
-        raw_df,
+    ranking, altas_detail, anulaciones_detail = calculate_facturacion_neta(
+        raw_facturacion_df,
+        raw_anulaciones_df,
         ranking_date,
         excluded_products,
     )
 
-    total_facturacion = (
+    total_altas = (
         float(ranking["FACTURACION_ALTAS_BRUTAS"].sum()) if not ranking.empty else 0.0
     )
-    total_polizas = int(ranking["POLIZAS_ALTAS"].sum()) if not ranking.empty else 0
-    total_agentes = int(ranking["AGENTE"].nunique()) if not ranking.empty else 0
+    total_anulaciones = (
+        float(ranking["FACTURACION_ANULACIONES"].sum()) if not ranking.empty else 0.0
+    )
+    total_neta = float(ranking["FACTURACION_NETA"].sum()) if not ranking.empty else 0.0
+    total_polizas_netas = int(ranking["POLIZAS_NETAS"].sum()) if not ranking.empty else 0
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Facturacion altas brutas", format_euro(total_facturacion))
-    col2.metric("Polizas altas", f"{total_polizas:,}".replace(",", "."))
-    col3.metric("Agentes", f"{total_agentes:,}".replace(",", "."))
-    col4.metric("Fecha ranking", ranking_date.strftime("%d/%m/%Y"))
+    col1.metric("Facturacion altas brutas", format_euro(total_altas))
+    col2.metric("Facturacion anulaciones", format_euro(total_anulaciones))
+    col3.metric("Facturacion neta", format_euro(total_neta))
+    col4.metric("Polizas netas", f"{total_polizas_netas:,}".replace(",", "."))
 
-    st.subheader("Ranking facturacion altas brutas")
+    st.subheader("Ranking facturacion neta")
 
     if ranking.empty:
         st.info("No hay datos para los filtros seleccionados.")
@@ -253,27 +502,27 @@ def main() -> None:
             ranking.style.format(
                 {
                     "FACTURACION_ALTAS_BRUTAS": lambda value: format_euro(float(value)),
-                    "PRIMA_MEDIA": lambda value: format_euro(float(value)),
+                    "FACTURACION_ANULACIONES": lambda value: format_euro(float(value)),
+                    "FACTURACION_NETA": lambda value: format_euro(float(value)),
+                    "PRIMA_MEDIA_NETA": lambda value: format_euro(float(value)),
                 }
             ),
             use_container_width=True,
             hide_index=True,
         )
 
-    with st.expander("Detalle de polizas incluidas"):
-        detail_columns = [
-            "HOJA_ORIGEN",
-            "PRODUCTO",
-            "POLIALTA",
-            "POLIZA",
-            "MEDIADOR",
-            "PRIMA NETA",
-            "PRIMA_NETA_VALOR",
-        ]
-        detail_columns = [column for column in detail_columns if column in detail.columns]
-
+    with st.expander("Detalle de altas incluidas"):
         st.dataframe(
-            detail[detail_columns].style.format(
+            altas_detail[detail_columns_for_display(altas_detail)].style.format(
+                {"PRIMA_NETA_VALOR": lambda value: format_euro(float(value))}
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with st.expander("Detalle de anulaciones incluidas"):
+        st.dataframe(
+            anulaciones_detail[detail_columns_for_display(anulaciones_detail)].style.format(
                 {"PRIMA_NETA_VALOR": lambda value: format_euro(float(value))}
             ),
             use_container_width=True,
@@ -282,16 +531,20 @@ def main() -> None:
 
     excel_bytes = dataframe_to_excel(
         ranking,
-        detail,
+        altas_detail,
+        anulaciones_detail,
+        sheet_summary,
         ranking_date,
         excluded_products,
     )
 
     st.download_button(
-        "Descargar ranking en Excel",
+        "Descargar ranking neto en Excel",
         data=excel_bytes,
-        file_name=f"ranking_decesos_altas_brutas_{ranking_date:%Y%m%d}.xlsx",
+        file_name=f"ranking_decesos_facturacion_neta_{ranking_date:%Y%m%d}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
 if __name__ == "__main__":
     main()

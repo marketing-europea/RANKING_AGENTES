@@ -21,10 +21,11 @@ REQUIRED_FACTURACION_COLUMNS = (
 
 REQUIRED_ANULACIONES_COLUMNS = (
     "PRODUCTO",
-    "FECHA BAJA",
+    "FECHA EMISION",
     "POLIZA",
     "MEDIADOR",
     "PRIMA NETA",
+    "CAUSA",
 )
 
 AGENCY_NAME_COLUMNS = (
@@ -257,7 +258,7 @@ def calculate_facturacion_neta(
         anulaciones_df,
         ranking_date,
         excluded_products,
-        "FECHA BAJA",
+        "FECHA EMISION",
         "ANULACION",
     )
 
@@ -380,6 +381,8 @@ def detail_columns_for_display(detail: pd.DataFrame) -> list[str]:
         "PRODUCTO",
         "POLIALTA",
         "FECHA BAJA",
+        "FECHA EMISION",
+        "FECHA GRABACION",
         "CAUSA",
         "MOTIVO",
         "POLIZA",
@@ -413,6 +416,7 @@ def dataframe_to_excel(
             {"CAMPO": "ANIO", "VALOR": ranking_date.year},
             {"CAMPO": "MES_HASTA", "VALOR": ranking_date.month},
             {"CAMPO": "PRODUCTOS_EXCLUIDOS", "VALOR": ", ".join(excluded_products)},
+            {"CAMPO": "FECHA_ANULACIONES", "VALOR": "FECHA EMISION"},
             {"CAMPO": "ANULACIONES_EXCLUIDAS_CAUSA", "VALOR": "DEFUNCION, DEFUNCIÓN"},
         ]
     )

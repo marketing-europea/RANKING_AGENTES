@@ -40,12 +40,12 @@ REQUIRED_ANULACIONES_COLUMNS = (
     "CAUSA",
 )
 
+# Siniestros: fecha por FECHOCUR e importe solo por PAGOSPDT.
 REQUIRED_SINIESTROS_COLUMNS = (
     "PRODUCTO",
     "CODIMEDI",
     "FECHOCUR",
-    "PAGOSRZD",
-    "COSTESIN",
+    "PAGOSPDT",
 )
 
 REQUIRED_PRIMAS_COLUMNS = (
@@ -226,13 +226,11 @@ def prepare_mapeo_data(df: pd.DataFrame) -> pd.DataFrame:
     work["NOMBRE_AGENCIA_MAPEO"] = work["NOMBCOME"].apply(lambda value: normalize_text(value, ""))
     work["RESPONSABLE"] = work["Responsable"].apply(lambda value: normalize_text(value, "Sin responsable"))
 
-    mapeo = (
+    return (
         work[["AGENTE", "CODIMEDI", "NOMBRE_AGENCIA_MAPEO", "RESPONSABLE"]]
         .drop_duplicates("AGENTE")
         .copy()
     )
-
-    return mapeo
 
 
 def add_mapeo_to_ranking(ranking: pd.DataFrame, mapeo: pd.DataFrame) -> pd.DataFrame:
@@ -256,9 +254,7 @@ def add_mapeo_to_ranking(ranking: pd.DataFrame, mapeo: pd.DataFrame) -> pd.DataF
     ]
     result["RESPONSABLE"] = result["RESPONSABLE"].fillna("Sin responsable")
 
-    result = result.drop(columns=["NOMBRE_AGENCIA_MAPEO"], errors="ignore")
-
-    return result
+    return result.drop(columns=["NOMBRE_AGENCIA_MAPEO"], errors="ignore")
 
 
 def add_mapeo_to_simple_ranking(ranking: pd.DataFrame, mapeo: pd.DataFrame) -> pd.DataFrame:
@@ -282,9 +278,7 @@ def add_mapeo_to_simple_ranking(ranking: pd.DataFrame, mapeo: pd.DataFrame) -> p
     ]
     result["RESPONSABLE"] = result["RESPONSABLE"].fillna("Sin responsable")
 
-    result = result.drop(columns=["NOMBRE_AGENCIA_MAPEO"], errors="ignore")
-
-    return result
+    return result.drop(columns=["NOMBRE_AGENCIA_MAPEO"], errors="ignore")
 
 
 # =========================
@@ -423,24 +417,25 @@ def aggregate_movements(
     )
 
 
-    def prepare_siniestros_data(df: pd.DataFrame) -> pd.DataFrame:
-        work = df.copy()
+def prepare_siniestros_data(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
 
-        work["PRODUCTO_NORMALIZADO"] = work["PRODUCTO"].apply(normalize_product)
-        work["AGENTE"] = work["CODIMEDI"].apply(normalize_agent)
+    work["PRODUCTO_NORMALIZADO"] = work["PRODUCTO"].apply(normalize_product)
+    work["AGENTE"] = work["CODIMEDI"].apply(normalize_agent)
 
-    # Nueva lógica: usamos fecha de ocurrencia
-        work["FECHA_SINIESTRO"] = pd.to_datetime(
-            work["FECHOCUR"],
-            dayfirst=True,
-            errors="coerce",
+    # Nueva logica: fecha por fecha de ocurrencia.
+    work["FECHA_SINIESTRO"] = pd.to_datetime(
+        work["FECHOCUR"],
+        dayfirst=True,
+        errors="coerce",
     )
+    work["ANIO_SINIESTRO"] = work["FECHA_SINIESTRO"].dt.year
+    work["MES_SINIESTRO"] = work["FECHA_SINIESTRO"].dt.month
 
-        work["ANIO_SINIESTRO"] = work["FECHA_SINIESTRO"].dt.year
-        work["MES_SINIESTRO"] = work["FECHA_SINIESTRO"].dt.month
-
-    # Nueva lógica: solo pagos realizados
+    # Nueva logica: importe de siniestro = solo pagos realizados.
     work["PAGOSPDT_VALOR"] = work["PAGOSPDT"].apply(parse_spanish_number)
+
+    # Columnas auxiliares para comprobar en detalle, no se usan para calcular siniestralidad.
     work["PAGOSRZD_VALOR"] = (
         work["PAGOSRZD"].apply(parse_spanish_number)
         if "PAGOSRZD" in work.columns
@@ -1244,7 +1239,7 @@ def siniestros_columns_for_display(detail: pd.DataFrame) -> list[str]:
         "PRODUCTO",
         "CODIMEDI",
         "AGENTE",
-        "FECHDECL",
+        "FECHOCUR",
         "FECHA_SINIESTRO",
         "ANIO_SINIESTRO",
         "MES_SINIESTRO",
@@ -1254,6 +1249,8 @@ def siniestros_columns_for_display(detail: pd.DataFrame) -> list[str]:
         "MOTIVO",
         "COBERTURA",
         "NATURALEZA",
+        "PAGOSPDT",
+        "PAGOSPDT_VALOR",
         "PAGOSRZD",
         "PAGOSRZD_VALOR",
         "COSTESIN",
@@ -1364,6 +1361,8 @@ def dataframe_to_excel(
             {"CAMPO": "MES_HASTA", "VALOR": ranking_date.month},
             {"CAMPO": "PRODUCTOS_EXCLUIDOS", "VALOR": ", ".join(excluded_products)},
             {"CAMPO": "REGLA_ANULACIONES_DECESOS", "VALOR": "FECHA EMISION del 1 al 25 de enero se imputa al año anterior"},
+            {"CAMPO": "SINIESTROS_FECHA", "VALOR": "FECHOCUR"},
+            {"CAMPO": "SINIESTROS_IMPORTE", "VALOR": "Solo PAGOSPDT"},
             {"CAMPO": "DECESOS_LIGA_PRO", "VALOR": "Facturacion neta >= 30.000 y siniestralidad < 25%"},
             {"CAMPO": "DECESOS_LIGA_ELITE", "VALOR": "Facturacion neta >= 60.000 y siniestralidad < 25%"},
             {"CAMPO": "SALUD_LIGA_PRO", "VALOR": "Facturacion Salud >= 25.000 y Facturacion Decesos >= 12.000"},
@@ -1405,7 +1404,7 @@ def dataframe_to_excel(
 def main() -> None:
     st.set_page_config(page_title="Ranking agentes", layout="wide")
 
-    st.title("Ranking agentes - DECESOS + SALUD")
+    st.title("Ranking agentes - DECESOS + SALUD + VIDA")
 
     ranking_date = st.date_input(
         "Para que fecha quieres calcular el ranking?",
@@ -1486,7 +1485,7 @@ def main() -> None:
         or uploaded_facturacion_vida is None
         or uploaded_mapeo is None
     ):
-        st.info("Sube todos los archivos para calcular Decesos, Salud, mapeo y rankings.")
+        st.info("Sube todos los archivos para calcular Decesos, Salud, Vida, mapeo y rankings.")
         st.stop()
 
     try:
@@ -1631,7 +1630,6 @@ def main() -> None:
         raw_bajas_salud_df,
         ranking_date,
     )
-
     ranking_vida = add_mapeo_to_simple_ranking(ranking_vida, mapeo)
 
     ranking_decesos_top10 = build_ranking_decesos_top10(ranking)
@@ -1764,15 +1762,29 @@ def main() -> None:
         st.subheader("Detalles")
 
         with st.expander("Detalle de altas Decesos incluidas"):
-            st.dataframe(altas_detail[detail_columns_for_display(altas_detail)].style.format({"PRIMA_NETA_VALOR": lambda value: format_euro(float(value))}), use_container_width=True, hide_index=True)
+            st.dataframe(
+                altas_detail[detail_columns_for_display(altas_detail)].style.format(
+                    {"PRIMA_NETA_VALOR": lambda value: format_euro(float(value))}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         with st.expander("Detalle de anulaciones Decesos incluidas"):
-            st.dataframe(anulaciones_detail[detail_columns_for_display(anulaciones_detail)].style.format({"PRIMA_NETA_VALOR": lambda value: format_euro(float(value))}), use_container_width=True, hide_index=True)
+            st.dataframe(
+                anulaciones_detail[detail_columns_for_display(anulaciones_detail)].style.format(
+                    {"PRIMA_NETA_VALOR": lambda value: format_euro(float(value))}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         with st.expander("Detalle de siniestros Decesos incluidos"):
+            st.caption("El importe usado para siniestralidad es PAGOSPDT_VALOR. La fecha usada para año/mes es FECHOCUR.")
             st.dataframe(
                 siniestros_detail[siniestros_columns_for_display(siniestros_detail)].style.format(
                     {
+                        "PAGOSPDT_VALOR": lambda value: format_euro(float(value)),
                         "PAGOSRZD_VALOR": lambda value: format_euro(float(value)),
                         "COSTESIN_VALOR": lambda value: format_euro(float(value)),
                         "IMPORTE_SINIESTRO": lambda value: format_euro(float(value)),
@@ -1783,22 +1795,58 @@ def main() -> None:
             )
 
         with st.expander("Detalle de primas emitidas Decesos"):
-            st.dataframe(primas_emitidas_detail[primas_columns_for_display(primas_emitidas_detail)].style.format({"POLIPNET_VALOR": lambda value: format_euro(float(value))}), use_container_width=True, hide_index=True)
+            st.dataframe(
+                primas_emitidas_detail[primas_columns_for_display(primas_emitidas_detail)].style.format(
+                    {"POLIPNET_VALOR": lambda value: format_euro(float(value))}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         with st.expander("Detalle de primas anuladas Decesos"):
-            st.dataframe(primas_anuladas_detail[primas_columns_for_display(primas_anuladas_detail)].style.format({"POLIPNET_VALOR": lambda value: format_euro(float(value))}), use_container_width=True, hide_index=True)
+            st.dataframe(
+                primas_anuladas_detail[primas_columns_for_display(primas_anuladas_detail)].style.format(
+                    {"POLIPNET_VALOR": lambda value: format_euro(float(value))}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         with st.expander("Detalle Salud - facturacion bruta"):
-            st.dataframe(salud_bruta_detail[salud_columns_for_display(salud_bruta_detail)].style.format({"PRIMA_NETA_SALUD_VALOR": lambda value: format_euro(float(value))}), use_container_width=True, hide_index=True)
+            st.dataframe(
+                salud_bruta_detail[salud_columns_for_display(salud_bruta_detail)].style.format(
+                    {"PRIMA_NETA_SALUD_VALOR": lambda value: format_euro(float(value))}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         with st.expander("Detalle Salud - anulaciones"):
-            st.dataframe(salud_anulaciones_detail[salud_columns_for_display(salud_anulaciones_detail)].style.format({"PRIMA_NETA_SALUD_VALOR": lambda value: format_euro(float(value))}), use_container_width=True, hide_index=True)
+            st.dataframe(
+                salud_anulaciones_detail[salud_columns_for_display(salud_anulaciones_detail)].style.format(
+                    {"PRIMA_NETA_SALUD_VALOR": lambda value: format_euro(float(value))}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         with st.expander("Detalle Vida - facturacion bruta"):
-            st.dataframe(vida_bruta_detail[vida_columns_for_display(vida_bruta_detail)].style.format({"PRIMA_VIDA_VALOR": lambda value: format_euro(float(value))}), use_container_width=True, hide_index=True)
+            st.dataframe(
+                vida_bruta_detail[vida_columns_for_display(vida_bruta_detail)].style.format(
+                    {"PRIMA_VIDA_VALOR": lambda value: format_euro(float(value))}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         with st.expander("Detalle Vida - anulaciones"):
-            st.dataframe(vida_anulaciones_detail[vida_columns_for_display(vida_anulaciones_detail)].style.format({"PRIMA_VIDA_VALOR": lambda value: format_euro(float(value))}), use_container_width=True, hide_index=True)
+            st.dataframe(
+                vida_anulaciones_detail[vida_columns_for_display(vida_anulaciones_detail)].style.format(
+                    {"PRIMA_VIDA_VALOR": lambda value: format_euro(float(value))}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     excel_bytes = dataframe_to_excel(
         ranking,

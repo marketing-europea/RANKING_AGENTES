@@ -331,7 +331,7 @@ def prepare_decesos_data(
         enero_hasta_25 = (
             work["FECHA_MOVIMIENTO"].notna()
             & work["FECHA_MOVIMIENTO"].dt.month.eq(1)
-            & work["FECHA_MOVIMIENTO"].dt.day.le(25)
+            & work["FECHA_MOVIMIENTO"].dt.day.lt(25)
         )
         work.loc[enero_hasta_25, "ANIO_MOVIMIENTO"] = (
             work.loc[enero_hasta_25, "ANIO_MOVIMIENTO"] - 1

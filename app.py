@@ -43,7 +43,7 @@ REQUIRED_ANULACIONES_COLUMNS = (
 REQUIRED_SINIESTROS_COLUMNS = (
     "PRODUCTO",
     "CODIMEDI",
-    "FECHDECL",
+    "FECHOCUR",
     "PAGOSRZD",
     "COSTESIN",
 )
@@ -423,27 +423,36 @@ def aggregate_movements(
     )
 
 
-def prepare_siniestros_data(df: pd.DataFrame) -> pd.DataFrame:
-    work = df.copy()
+    def prepare_siniestros_data(df: pd.DataFrame) -> pd.DataFrame:
+        work = df.copy()
 
-    work["PRODUCTO_NORMALIZADO"] = work["PRODUCTO"].apply(normalize_product)
-    work["AGENTE"] = work["CODIMEDI"].apply(normalize_agent)
+        work["PRODUCTO_NORMALIZADO"] = work["PRODUCTO"].apply(normalize_product)
+        work["AGENTE"] = work["CODIMEDI"].apply(normalize_agent)
 
-    work["FECHA_SINIESTRO"] = pd.to_datetime(
-        work["FECHDECL"],
-        dayfirst=True,
-        errors="coerce",
+    # Nueva lógica: usamos fecha de ocurrencia
+        work["FECHA_SINIESTRO"] = pd.to_datetime(
+            work["FECHOCUR"],
+            dayfirst=True,
+            errors="coerce",
     )
 
-    work["ANIO_SINIESTRO"] = work["FECHA_SINIESTRO"].dt.year
-    work["MES_SINIESTRO"] = work["FECHA_SINIESTRO"].dt.month
+        work["ANIO_SINIESTRO"] = work["FECHA_SINIESTRO"].dt.year
+        work["MES_SINIESTRO"] = work["FECHA_SINIESTRO"].dt.month
 
-    work["PAGOSRZD_VALOR"] = work["PAGOSRZD"].apply(parse_spanish_number)
-    work["COSTESIN_VALOR"] = work["COSTESIN"].apply(parse_spanish_number)
+    # Nueva lógica: solo pagos realizados
+    work["PAGOSPDT_VALOR"] = work["PAGOSPDT"].apply(parse_spanish_number)
+    work["PAGOSRZD_VALOR"] = (
+        work["PAGOSRZD"].apply(parse_spanish_number)
+        if "PAGOSRZD" in work.columns
+        else 0.0
+    )
+    work["COSTESIN_VALOR"] = (
+        work["COSTESIN"].apply(parse_spanish_number)
+        if "COSTESIN" in work.columns
+        else 0.0
+    )
 
-    # Nueva lógica:
-    # Para siniestralidad solo contamos pagos realizados.
-    work["IMPORTE_SINIESTRO"] = work["PAGOSRZD_VALOR"]
+    work["IMPORTE_SINIESTRO"] = work["PAGOSPDT_VALOR"]
 
     return work
 

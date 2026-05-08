@@ -58,8 +58,13 @@ REQUIRED_FACTURACION_SALUD_COLUMNS = (
     "MEDIADOR",
     "POLIEFEC",
     "PRIMA NETA",
-    "ESTADO",
-    "FECHBAJA",
+)
+
+REQUIRED_BAJAS_SALUD_COLUMNS = (
+    "POLIZA",
+    "DES_PRODUCTO",
+    "FEC_EFECTO_BAJA",
+    "FEC_EFECTO_REACTIV",
 )
 
 REQUIRED_MAPEO_COLUMNS = (
@@ -661,12 +666,27 @@ def prepare_facturacion_salud_data(df: pd.DataFrame) -> pd.DataFrame:
     work["MES_SALUD"] = work["FECHA_EFECTO_SALUD"].dt.month
     work["PRIMA_NETA_SALUD_VALOR"] = work["PRIMA NETA"].apply(parse_spanish_number)
 
-    work["ESTADO_NORMALIZADO"] = work["ESTADO"].apply(normalize_product)
+    return work
+
+
+def prepare_bajas_salud_data(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
+
+    work["POLIZA_NORMALIZADA"] = work["POLIZA"].apply(lambda value: normalize_text(value, ""))
+    work["DES_PRODUCTO_NORMALIZADO"] = work["DES_PRODUCTO"].apply(normalize_product)
+
     work["FECHA_BAJA_SALUD"] = pd.to_datetime(
-        work["FECHBAJA"],
+        work["FEC_EFECTO_BAJA"],
         dayfirst=True,
         errors="coerce",
     )
+
+    work["FECHA_REACTIVACION_SALUD"] = pd.to_datetime(
+        work["FEC_EFECTO_REACTIV"],
+        dayfirst=True,
+        errors="coerce",
+    )
+
     work["ANIO_BAJA_SALUD"] = work["FECHA_BAJA_SALUD"].dt.year
     work["MES_BAJA_SALUD"] = work["FECHA_BAJA_SALUD"].dt.month
 
@@ -675,9 +695,11 @@ def prepare_facturacion_salud_data(df: pd.DataFrame) -> pd.DataFrame:
 
 def calculate_facturacion_salud(
     facturacion_salud_df: pd.DataFrame,
+    bajas_salud_df: pd.DataFrame,
     ranking_date: date,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     facturacion_detail = prepare_facturacion_salud_data(facturacion_salud_df)
+    bajas_detail = prepare_bajas_salud_data(bajas_salud_df)
 
     bruta_mask = (
         facturacion_detail["FECHA_EFECTO_SALUD"].notna()
@@ -685,15 +707,26 @@ def calculate_facturacion_salud(
         & facturacion_detail["MES_SALUD"].le(ranking_date.month)
     )
 
-    anulaciones_mask = (
-        facturacion_detail["FECHA_BAJA_SALUD"].notna()
-        & facturacion_detail["ANIO_BAJA_SALUD"].eq(ranking_date.year)
-        & facturacion_detail["MES_BAJA_SALUD"].le(ranking_date.month)
-        & facturacion_detail["ESTADO_NORMALIZADO"].eq("BAJA")
+    salud_bruta_detail = facturacion_detail[bruta_mask].copy()
+
+    bajas_mask = (
+        bajas_detail["FECHA_BAJA_SALUD"].notna()
+        & bajas_detail["ANIO_BAJA_SALUD"].eq(ranking_date.year)
+        & bajas_detail["MES_BAJA_SALUD"].le(ranking_date.month)
+        & bajas_detail["FECHA_REACTIVACION_SALUD"].isna()
+        & ~bajas_detail["DES_PRODUCTO_NORMALIZADO"].eq("ASISA VIDA RIESGO")
     )
 
-    salud_bruta_detail = facturacion_detail[bruta_mask].copy()
-    salud_anulaciones_detail = facturacion_detail[anulaciones_mask].copy()
+    bajas_validas = bajas_detail[bajas_mask].copy()
+    bajas_validas = bajas_validas.drop_duplicates("POLIZA_NORMALIZADA")
+
+    salud_anulaciones_detail = pd.merge(
+        facturacion_detail,
+        bajas_validas,
+        on="POLIZA_NORMALIZADA",
+        how="inner",
+        suffixes=("", "_BAJA"),
+    )
 
     salud_bruta = (
         salud_bruta_detail.groupby("AGENTE", dropna=False)
@@ -1023,11 +1056,12 @@ def salud_columns_for_display(detail: pd.DataFrame) -> list[str]:
         "AGENTE",
         "POLIEFEC",
         "FECHA_EFECTO_SALUD",
-        "ESTADO",
-        "FECHBAJA",
-        "FECHA_BAJA_SALUD",
         "PRIMA NETA",
         "PRIMA_NETA_SALUD_VALOR",
+        "DES_PRODUCTO",
+        "FEC_EFECTO_BAJA",
+        "FEC_EFECTO_REACTIV",
+        "MOTIVO_BAJA",
         "TOMADOR",
         "NIF",
     ]
@@ -1064,7 +1098,7 @@ def dataframe_to_excel(
             {"CAMPO": "SALUD_LIGA_PRO", "VALOR": "Facturacion Salud >= 25.000 y Facturacion Decesos >= 12.000"},
             {"CAMPO": "SALUD_LIGA_ELITE", "VALOR": "Facturacion Salud >= 80.000 y Facturacion Decesos >= 4.000"},
             {"CAMPO": "SALUD_BRUTA", "VALOR": "FACTURACION_SALUD con POLIEFEC dentro del periodo"},
-            {"CAMPO": "SALUD_ANULACIONES", "VALOR": "FACTURACION_SALUD con ESTADO = Baja y FECHBAJA dentro del periodo"},
+            {"CAMPO": "SALUD_ANULACIONES", "VALOR": "INFORME_BAJAS_SALUD con FEC_EFECTO_BAJA dentro del periodo, sin FEC_EFECTO_REACTIV y excluyendo ASISA VIDA RIESGO"},
             {"CAMPO": "TOP_RANKINGS", "VALOR": "Se muestran hasta 10 puestos por facturacion neta aunque no entren en liga"},
         ]
     )
@@ -1132,9 +1166,9 @@ def main() -> None:
             accept_multiple_files=True,
         )
 
-    st.header("Archivo Salud y Mapeo")
+    st.header("Archivos Salud y Mapeo")
 
-    col_upload_6, col_upload_7 = st.columns(2)
+    col_upload_6, col_upload_7, col_upload_8 = st.columns(3)
 
     with col_upload_6:
         uploaded_facturacion_salud = st.file_uploader(
@@ -1144,6 +1178,13 @@ def main() -> None:
         )
 
     with col_upload_7:
+        uploaded_bajas_salud = st.file_uploader(
+            "Sube INFORME_BAJAS_SALUD.xlsx",
+            type=["xls", "xlsx"],
+            key="bajas_salud",
+        )
+
+    with col_upload_8:
         uploaded_mapeo = st.file_uploader(
             "Sube MAPEO_MEDIADORES.xlsx",
             type=["xls", "xlsx"],
@@ -1157,6 +1198,7 @@ def main() -> None:
         or not uploaded_primas_emitidas
         or not uploaded_primas_anuladas
         or uploaded_facturacion_salud is None
+        or uploaded_bajas_salud is None
         or uploaded_mapeo is None
     ):
         st.info("Sube todos los archivos para calcular Decesos, Salud, mapeo y rankings.")
@@ -1169,6 +1211,7 @@ def main() -> None:
         raw_primas_emitidas_df = read_excel_many_files(uploaded_primas_emitidas)
         raw_primas_anuladas_df = read_excel_many_files(uploaded_primas_anuladas)
         raw_facturacion_salud_df = read_excel_all_sheets(uploaded_facturacion_salud)
+        raw_bajas_salud_df = read_excel_all_sheets(uploaded_bajas_salud)
         raw_mapeo_df = read_excel_all_sheets(uploaded_mapeo)
     except Exception as error:
         st.error(f"No he podido leer los archivos: {error}")
@@ -1181,6 +1224,7 @@ def main() -> None:
         or raw_primas_emitidas_df.empty
         or raw_primas_anuladas_df.empty
         or raw_facturacion_salud_df.empty
+        or raw_bajas_salud_df.empty
         or raw_mapeo_df.empty
     ):
         st.warning("Alguno de los archivos esta vacio.")
@@ -1192,6 +1236,7 @@ def main() -> None:
     missing_primas_emitidas = validate_columns(raw_primas_emitidas_df, REQUIRED_PRIMAS_COLUMNS)
     missing_primas_anuladas = validate_columns(raw_primas_anuladas_df, REQUIRED_PRIMAS_COLUMNS)
     missing_facturacion_salud = validate_columns(raw_facturacion_salud_df, REQUIRED_FACTURACION_SALUD_COLUMNS)
+    missing_bajas_salud = validate_columns(raw_bajas_salud_df, REQUIRED_BAJAS_SALUD_COLUMNS)
     missing_mapeo = validate_columns(raw_mapeo_df, REQUIRED_MAPEO_COLUMNS)
 
     if (
@@ -1201,6 +1246,7 @@ def main() -> None:
         or missing_primas_emitidas
         or missing_primas_anuladas
         or missing_facturacion_salud
+        or missing_bajas_salud
         or missing_mapeo
     ):
         messages = []
@@ -1216,6 +1262,8 @@ def main() -> None:
             messages.append(f"Primas anuladas: {', '.join(missing_primas_anuladas)}")
         if missing_facturacion_salud:
             messages.append(f"Facturacion Salud: {', '.join(missing_facturacion_salud)}")
+        if missing_bajas_salud:
+            messages.append(f"Bajas Salud: {', '.join(missing_bajas_salud)}")
         if missing_mapeo:
             messages.append(f"Mapeo mediadores: {', '.join(missing_mapeo)}")
 
@@ -1232,6 +1280,7 @@ def main() -> None:
             build_sheet_summary(raw_primas_emitidas_df, "PRIMAS_EMITIDAS"),
             build_sheet_summary(raw_primas_anuladas_df, "PRIMAS_ANULADAS"),
             build_sheet_summary(raw_facturacion_salud_df, "FACTURACION_SALUD"),
+            build_sheet_summary(raw_bajas_salud_df, "BAJAS_SALUD"),
             build_sheet_summary(raw_mapeo_df, "MAPEO_MEDIADORES"),
         ],
         ignore_index=True,
@@ -1280,6 +1329,7 @@ def main() -> None:
 
     ranking_salud, salud_bruta_detail, salud_anulaciones_detail = calculate_facturacion_salud(
         raw_facturacion_salud_df,
+        raw_bajas_salud_df,
         ranking_date,
     )
 

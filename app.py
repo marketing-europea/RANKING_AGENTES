@@ -12,6 +12,16 @@ DEFAULT_RANKING_DATE = date(2026, 1, 30)
 DEFAULT_EXCLUDED_PRODUCTS = ("D600", "D460")
 SINIESTRALIDAD_MAXIMA = 0.25
 
+DECESOS_LIGA_PRO_MINIMA = 30000.0
+DECESOS_LIGA_ELITE_MINIMA = 60000.0
+SALUD_LIGA_PRO_MINIMA = 25000.0
+SALUD_LIGA_PRO_DECESOS_MINIMA = 12000.0
+SALUD_LIGA_ELITE_MINIMA = 80000.0
+SALUD_LIGA_ELITE_DECESOS_MINIMA = 4000.0
+
+COLOR_DECESOS = "#f32735"
+COLOR_SALUD = "#5271ff"
+
 REQUIRED_FACTURACION_COLUMNS = (
     "PRODUCTO",
     "POLIALTA",
@@ -51,8 +61,6 @@ REQUIRED_FACTURACION_SALUD_COLUMNS = (
     "ESTADO",
     "FECHBAJA",
 )
-
-REQUIRED_BAJAS_SALUD_COLUMNS = ()
 
 AGENCY_NAME_COLUMNS = (
     "NOMBRE AGENCIA",
@@ -186,6 +194,10 @@ def read_excel_many_files(uploaded_files) -> pd.DataFrame:
 def validate_columns(df: pd.DataFrame, required_columns: tuple[str, ...]) -> list[str]:
     return [column for column in required_columns if column not in df.columns]
 
+
+# =========================
+# DECESOS
+# =========================
 
 def prepare_decesos_data(
     df: pd.DataFrame,
@@ -578,6 +590,10 @@ def calculate_ranking(
     )
 
 
+# =========================
+# SALUD
+# =========================
+
 def prepare_facturacion_salud_data(df: pd.DataFrame) -> pd.DataFrame:
     work = df.copy()
 
@@ -592,27 +608,12 @@ def prepare_facturacion_salud_data(df: pd.DataFrame) -> pd.DataFrame:
     work["MES_SALUD"] = work["FECHA_EFECTO_SALUD"].dt.month
     work["PRIMA_NETA_SALUD_VALOR"] = work["PRIMA NETA"].apply(parse_spanish_number)
 
-    return work
-
-
-def prepare_bajas_salud_data(df: pd.DataFrame) -> pd.DataFrame:
-    work = df.copy()
-
-    work["POLIZA_NORMALIZADA"] = work["POLIZA"].apply(lambda value: normalize_text(value, ""))
-    work["DES_PRODUCTO_NORMALIZADO"] = work["DES_PRODUCTO"].apply(normalize_product)
-
+    work["ESTADO_NORMALIZADO"] = work["ESTADO"].apply(normalize_product)
     work["FECHA_BAJA_SALUD"] = pd.to_datetime(
-        work["FEC_EFECTO_BAJA"],
+        work["FECHBAJA"],
         dayfirst=True,
         errors="coerce",
     )
-
-    work["FECHA_REACTIVACION_SALUD"] = pd.to_datetime(
-        work["FEC_EFECTO_REACTIV"],
-        dayfirst=True,
-        errors="coerce",
-    )
-
     work["ANIO_BAJA_SALUD"] = work["FECHA_BAJA_SALUD"].dt.year
     work["MES_BAJA_SALUD"] = work["FECHA_BAJA_SALUD"].dt.month
 
@@ -621,38 +622,25 @@ def prepare_bajas_salud_data(df: pd.DataFrame) -> pd.DataFrame:
 
 def calculate_facturacion_salud(
     facturacion_salud_df: pd.DataFrame,
-    bajas_salud_df: pd.DataFrame,
     ranking_date: date,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     facturacion_detail = prepare_facturacion_salud_data(facturacion_salud_df)
-    bajas_detail = prepare_bajas_salud_data(bajas_salud_df)
 
-    altas_mask = (
+    bruta_mask = (
         facturacion_detail["FECHA_EFECTO_SALUD"].notna()
         & facturacion_detail["ANIO_SALUD"].eq(ranking_date.year)
         & facturacion_detail["MES_SALUD"].le(ranking_date.month)
     )
 
-    salud_bruta_detail = facturacion_detail[altas_mask].copy()
-
-    bajas_mask = (
-        bajas_detail["FECHA_BAJA_SALUD"].notna()
-        & bajas_detail["ANIO_BAJA_SALUD"].eq(ranking_date.year)
-        & bajas_detail["MES_BAJA_SALUD"].le(ranking_date.month)
-        & bajas_detail["FECHA_REACTIVACION_SALUD"].isna()
-        & ~bajas_detail["DES_PRODUCTO_NORMALIZADO"].eq("ASISA VIDA RIESGO")
+    anulaciones_mask = (
+        facturacion_detail["FECHA_BAJA_SALUD"].notna()
+        & facturacion_detail["ANIO_BAJA_SALUD"].eq(ranking_date.year)
+        & facturacion_detail["MES_BAJA_SALUD"].le(ranking_date.month)
+        & facturacion_detail["ESTADO_NORMALIZADO"].eq("BAJA")
     )
 
-    bajas_validas = bajas_detail[bajas_mask].copy()
-    bajas_validas = bajas_validas.drop_duplicates("POLIZA_NORMALIZADA")
-
-    salud_anulaciones_detail = pd.merge(
-        facturacion_detail,
-        bajas_validas,
-        on="POLIZA_NORMALIZADA",
-        how="inner",
-        suffixes=("", "_BAJA"),
-    )
+    salud_bruta_detail = facturacion_detail[bruta_mask].copy()
+    salud_anulaciones_detail = facturacion_detail[anulaciones_mask].copy()
 
     salud_bruta = (
         salud_bruta_detail.groupby("AGENTE", dropna=False)
@@ -725,6 +713,147 @@ def calculate_facturacion_salud(
     return ranking_salud, salud_bruta_detail, salud_anulaciones_detail
 
 
+# =========================
+# LIGAS
+# =========================
+
+def classify_liga_decesos(facturacion_decesos: float, cumple_siniestralidad: bool) -> str:
+    if not cumple_siniestralidad:
+        return "No cumple siniestralidad"
+
+    if facturacion_decesos >= DECESOS_LIGA_ELITE_MINIMA:
+        return "LIGA ELITE"
+
+    if facturacion_decesos >= DECESOS_LIGA_PRO_MINIMA:
+        return "LIGA PRO"
+
+    return "No clasifica"
+
+
+def classify_liga_salud(facturacion_salud: float, facturacion_decesos: float) -> str:
+    if (
+        facturacion_salud >= SALUD_LIGA_ELITE_MINIMA
+        and facturacion_decesos >= SALUD_LIGA_ELITE_DECESOS_MINIMA
+    ):
+        return "LIGA ELITE"
+
+    if (
+        facturacion_salud >= SALUD_LIGA_PRO_MINIMA
+        and facturacion_decesos >= SALUD_LIGA_PRO_DECESOS_MINIMA
+    ):
+        return "LIGA PRO"
+
+    return "No clasifica"
+
+
+def build_ranking_ligas_decesos(ranking: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "RANKING_LIGA_DECESOS",
+        "LIGA_DECESOS",
+        "AGENTE",
+        "NOMBRE_AGENCIA",
+        "FACTURACION_NETA",
+        "SINIESTRALIDAD",
+        "CUMPLE_SINIESTRALIDAD",
+        "IMPORTE_SINIESTROS",
+        "PRIMAS_NETAS",
+    ]
+
+    if ranking.empty:
+        return pd.DataFrame(columns=columns)
+
+    ranking_ligas = ranking.copy()
+    ranking_ligas["LIGA_DECESOS"] = [
+        classify_liga_decesos(facturacion, cumple)
+        for facturacion, cumple in zip(
+            ranking_ligas["FACTURACION_NETA"],
+            ranking_ligas["CUMPLE_SINIESTRALIDAD"],
+        )
+    ]
+
+    ranking_ligas = ranking_ligas[
+        ranking_ligas["LIGA_DECESOS"].isin(["LIGA ELITE", "LIGA PRO"])
+    ].copy()
+
+    if ranking_ligas.empty:
+        return pd.DataFrame(columns=columns)
+
+    liga_order = {"LIGA ELITE": 1, "LIGA PRO": 2}
+    ranking_ligas["ORDEN_LIGA"] = ranking_ligas["LIGA_DECESOS"].map(liga_order)
+
+    ranking_ligas = ranking_ligas.sort_values(
+        ["ORDEN_LIGA", "FACTURACION_NETA", "SINIESTRALIDAD", "AGENTE"],
+        ascending=[True, False, True, True],
+    )
+
+    ranking_ligas.insert(0, "RANKING_LIGA_DECESOS", range(1, len(ranking_ligas) + 1))
+
+    return ranking_ligas[columns]
+
+
+def build_ranking_ligas_salud(ranking_salud: pd.DataFrame, ranking_decesos: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "RANKING_LIGA_SALUD",
+        "LIGA_SALUD",
+        "AGENTE",
+        "NOMBRE_AGENCIA",
+        "FACTURACION_SALUD_NETA",
+        "FACTURACION_DECESOS_NETA",
+    ]
+
+    if ranking_salud.empty:
+        return pd.DataFrame(columns=columns)
+
+    salud = ranking_salud[
+        ["AGENTE", "FACTURACION_SALUD_NETA"]
+    ].copy()
+
+    if ranking_decesos.empty:
+        decesos = pd.DataFrame(columns=["AGENTE", "NOMBRE_AGENCIA", "FACTURACION_DECESOS_NETA"])
+    else:
+        decesos = ranking_decesos[
+            ["AGENTE", "NOMBRE_AGENCIA", "FACTURACION_NETA"]
+        ].rename(columns={"FACTURACION_NETA": "FACTURACION_DECESOS_NETA"})
+
+    ranking_ligas = pd.merge(salud, decesos, on="AGENTE", how="left")
+    ranking_ligas["FACTURACION_DECESOS_NETA"] = ranking_ligas["FACTURACION_DECESOS_NETA"].fillna(0)
+    ranking_ligas["NOMBRE_AGENCIA"] = [
+        name if not pd.isna(name) and str(name).strip() != "" else agent
+        for name, agent in zip(ranking_ligas["NOMBRE_AGENCIA"], ranking_ligas["AGENTE"])
+    ]
+
+    ranking_ligas["LIGA_SALUD"] = [
+        classify_liga_salud(facturacion_salud, facturacion_decesos)
+        for facturacion_salud, facturacion_decesos in zip(
+            ranking_ligas["FACTURACION_SALUD_NETA"],
+            ranking_ligas["FACTURACION_DECESOS_NETA"],
+        )
+    ]
+
+    ranking_ligas = ranking_ligas[
+        ranking_ligas["LIGA_SALUD"].isin(["LIGA ELITE", "LIGA PRO"])
+    ].copy()
+
+    if ranking_ligas.empty:
+        return pd.DataFrame(columns=columns)
+
+    liga_order = {"LIGA ELITE": 1, "LIGA PRO": 2}
+    ranking_ligas["ORDEN_LIGA"] = ranking_ligas["LIGA_SALUD"].map(liga_order)
+
+    ranking_ligas = ranking_ligas.sort_values(
+        ["ORDEN_LIGA", "FACTURACION_SALUD_NETA", "FACTURACION_DECESOS_NETA", "AGENTE"],
+        ascending=[True, False, False, True],
+    )
+
+    ranking_ligas.insert(0, "RANKING_LIGA_SALUD", range(1, len(ranking_ligas) + 1))
+
+    return ranking_ligas[columns]
+
+
+# =========================
+# OUTPUT
+# =========================
+
 def build_sheet_summary(df: pd.DataFrame, file_name: str) -> pd.DataFrame:
     if "HOJA_ORIGEN" not in df.columns:
         return pd.DataFrame(columns=["TIPO_ARCHIVO", "ARCHIVO", "HOJA", "FILAS_LEIDAS"])
@@ -754,6 +883,32 @@ def format_euro(value: float) -> str:
 
 def format_percent(value: float) -> str:
     return f"{value:.2%}".replace(".", ",")
+
+
+def style_liga_decesos(df: pd.DataFrame):
+    return df.style.format(
+        {
+            "FACTURACION_NETA": lambda value: format_euro(float(value)),
+            "SINIESTRALIDAD": lambda value: format_percent(float(value)),
+            "IMPORTE_SINIESTROS": lambda value: format_euro(float(value)),
+            "PRIMAS_NETAS": lambda value: format_euro(float(value)),
+        }
+    ).set_properties(
+        subset=["LIGA_DECESOS"],
+        **{"background-color": COLOR_DECESOS, "color": "white", "font-weight": "bold"},
+    )
+
+
+def style_liga_salud(df: pd.DataFrame):
+    return df.style.format(
+        {
+            "FACTURACION_SALUD_NETA": lambda value: format_euro(float(value)),
+            "FACTURACION_DECESOS_NETA": lambda value: format_euro(float(value)),
+        }
+    ).set_properties(
+        subset=["LIGA_SALUD"],
+        **{"background-color": COLOR_SALUD, "color": "white", "font-weight": "bold"},
+    )
 
 
 def detail_columns_for_display(detail: pd.DataFrame) -> list[str]:
@@ -828,7 +983,7 @@ def primas_columns_for_display(detail: pd.DataFrame) -> list[str]:
     return [column for column in columns if column in detail.columns]
 
 
-def salud_bruta_columns_for_display(detail: pd.DataFrame) -> list[str]:
+def salud_columns_for_display(detail: pd.DataFrame) -> list[str]:
     columns = [
         "ARCHIVO_ORIGEN",
         "HOJA_ORIGEN",
@@ -839,33 +994,13 @@ def salud_bruta_columns_for_display(detail: pd.DataFrame) -> list[str]:
         "AGENTE",
         "POLIEFEC",
         "FECHA_EFECTO_SALUD",
+        "ESTADO",
+        "FECHBAJA",
+        "FECHA_BAJA_SALUD",
         "PRIMA NETA",
         "PRIMA_NETA_SALUD_VALOR",
-        "ESTADO",
         "TOMADOR",
         "NIF",
-    ]
-
-    return [column for column in columns if column in detail.columns]
-
-
-def salud_anulaciones_columns_for_display(detail: pd.DataFrame) -> list[str]:
-    columns = [
-        "ARCHIVO_ORIGEN",
-        "HOJA_ORIGEN",
-        "PRODUCTO",
-        "IDPOLIZA",
-        "POLIZA_NORMALIZADA",
-        "MEDIADOR",
-        "AGENTE",
-        "POLIEFEC",
-        "FECHA_EFECTO_SALUD",
-        "PRIMA NETA",
-        "PRIMA_NETA_SALUD_VALOR",
-        "DES_PRODUCTO",
-        "FEC_EFECTO_BAJA",
-        "FEC_EFECTO_REACTIV",
-        "MOTIVO_BAJA",
     ]
 
     return [column for column in columns if column in detail.columns]
@@ -874,6 +1009,8 @@ def salud_anulaciones_columns_for_display(detail: pd.DataFrame) -> list[str]:
 def dataframe_to_excel(
     ranking: pd.DataFrame,
     ranking_salud: pd.DataFrame,
+    ranking_liga_decesos: pd.DataFrame,
+    ranking_liga_salud: pd.DataFrame,
     altas_detail: pd.DataFrame,
     anulaciones_detail: pd.DataFrame,
     siniestros_detail: pd.DataFrame,
@@ -893,65 +1030,41 @@ def dataframe_to_excel(
             {"CAMPO": "ANIO", "VALOR": ranking_date.year},
             {"CAMPO": "MES_HASTA", "VALOR": ranking_date.month},
             {"CAMPO": "PRODUCTOS_EXCLUIDOS", "VALOR": ", ".join(excluded_products)},
-            {"CAMPO": "FECHA_ANULACIONES_DECESOS", "VALOR": "FECHA EMISION"},
-            {"CAMPO": "FECHA_SINIESTROS", "VALOR": "FECHDECL"},
-            {"CAMPO": "PRIMAS_NETAS", "VALOR": "PRIMAS EMITIDAS POLIPNET - PRIMAS ANULADAS POLIPNET"},
-            {"CAMPO": "SINIESTRALIDAD", "VALOR": "IMPORTE SINIESTROS / PRIMAS NETAS"},
-            {"CAMPO": "SINIESTRALIDAD_MAXIMA", "VALOR": "25%"},
-            {"CAMPO": "SALUD_BRUTA", "VALOR": "FACTURACION_SALUD por POLIEFEC"},
-            {"CAMPO": "SALUD_ANULACIONES", "VALOR": "Informe bajas por FEC_EFECTO_BAJA, sin FEC_EFECTO_REACTIV y excluyendo ASISA VIDA RIESGO"},
-            {"CAMPO": "SALUD_NETA", "VALOR": "FACTURACION_SALUD_BRUTA - FACTURACION_SALUD_ANULACIONES"},
+            {"CAMPO": "DECESOS_LIGA_PRO", "VALOR": "Facturacion neta >= 30.000 y siniestralidad < 25%"},
+            {"CAMPO": "DECESOS_LIGA_ELITE", "VALOR": "Facturacion neta >= 60.000 y siniestralidad < 25%"},
+            {"CAMPO": "SALUD_LIGA_PRO", "VALOR": "Facturacion Salud >= 25.000 y Facturacion Decesos >= 12.000"},
+            {"CAMPO": "SALUD_LIGA_ELITE", "VALOR": "Facturacion Salud >= 80.000 y Facturacion Decesos >= 4.000"},
+            {"CAMPO": "SALUD_BRUTA", "VALOR": "FACTURACION_SALUD con POLIEFEC dentro del periodo"},
+            {"CAMPO": "SALUD_ANULACIONES", "VALOR": "FACTURACION_SALUD con ESTADO = Baja y FECHBAJA dentro del periodo"},
         ]
     )
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         parametros.to_excel(writer, index=False, sheet_name="PARAMETROS")
         sheet_summary.to_excel(writer, index=False, sheet_name="COMPROBACION_HOJAS")
+        ranking_liga_decesos.to_excel(writer, index=False, sheet_name="RANKING_DECESOS")
+        ranking_liga_salud.to_excel(writer, index=False, sheet_name="RANKING_SALUD")
         ranking.to_excel(writer, index=False, sheet_name="RANKING_NETO_DECESOS")
         ranking_salud.to_excel(writer, index=False, sheet_name="FACTURACION_SALUD")
-        altas_detail[detail_columns_for_display(altas_detail)].to_excel(
-            writer,
-            index=False,
-            sheet_name="DETALLE_ALTAS_DECESOS",
-        )
-        anulaciones_detail[detail_columns_for_display(anulaciones_detail)].to_excel(
-            writer,
-            index=False,
-            sheet_name="DETALLE_ANUL_DECESOS",
-        )
-        siniestros_detail[siniestros_columns_for_display(siniestros_detail)].to_excel(
-            writer,
-            index=False,
-            sheet_name="DETALLE_SINIESTROS",
-        )
-        primas_emitidas_detail[primas_columns_for_display(primas_emitidas_detail)].to_excel(
-            writer,
-            index=False,
-            sheet_name="DETALLE_PRIMAS_EMIT",
-        )
-        primas_anuladas_detail[primas_columns_for_display(primas_anuladas_detail)].to_excel(
-            writer,
-            index=False,
-            sheet_name="DETALLE_PRIMAS_ANUL",
-        )
-        salud_bruta_detail[salud_bruta_columns_for_display(salud_bruta_detail)].to_excel(
-            writer,
-            index=False,
-            sheet_name="DETALLE_SALUD_BRUTA",
-        )
-        salud_anulaciones_detail[salud_anulaciones_columns_for_display(salud_anulaciones_detail)].to_excel(
-            writer,
-            index=False,
-            sheet_name="DETALLE_SALUD_ANUL",
-        )
+        altas_detail[detail_columns_for_display(altas_detail)].to_excel(writer, index=False, sheet_name="DETALLE_ALTAS_DECESOS")
+        anulaciones_detail[detail_columns_for_display(anulaciones_detail)].to_excel(writer, index=False, sheet_name="DETALLE_ANUL_DECESOS")
+        siniestros_detail[siniestros_columns_for_display(siniestros_detail)].to_excel(writer, index=False, sheet_name="DETALLE_SINIESTROS")
+        primas_emitidas_detail[primas_columns_for_display(primas_emitidas_detail)].to_excel(writer, index=False, sheet_name="DETALLE_PRIMAS_EMIT")
+        primas_anuladas_detail[primas_columns_for_display(primas_anuladas_detail)].to_excel(writer, index=False, sheet_name="DETALLE_PRIMAS_ANUL")
+        salud_bruta_detail[salud_columns_for_display(salud_bruta_detail)].to_excel(writer, index=False, sheet_name="DETALLE_SALUD_BRUTA")
+        salud_anulaciones_detail[salud_columns_for_display(salud_anulaciones_detail)].to_excel(writer, index=False, sheet_name="DETALLE_SALUD_ANUL")
 
     return output.getvalue()
 
 
+# =========================
+# APP
+# =========================
+
 def main() -> None:
     st.set_page_config(page_title="Ranking agentes", layout="wide")
 
-    st.title("Ranking agentes - DECESOS + Facturacion Salud")
+    st.title("Ranking agentes - DECESOS + SALUD")
 
     ranking_date = st.date_input(
         "Para que fecha quieres calcular el ranking?",
@@ -965,25 +1078,13 @@ def main() -> None:
     col_upload_4, col_upload_5 = st.columns(2)
 
     with col_upload_1:
-        uploaded_facturacion = st.file_uploader(
-            "Sube FACTURACION_DECESOS.xls",
-            type=["xls", "xlsx"],
-            key="facturacion",
-        )
+        uploaded_facturacion = st.file_uploader("Sube FACTURACION_DECESOS.xls", type=["xls", "xlsx"], key="facturacion")
 
     with col_upload_2:
-        uploaded_anulaciones = st.file_uploader(
-            "Sube FACTURACION_ANULACIONES_DECESOS.xls",
-            type=["xls", "xlsx"],
-            key="anulaciones",
-        )
+        uploaded_anulaciones = st.file_uploader("Sube FACTURACION_ANULACIONES_DECESOS.xls", type=["xls", "xlsx"], key="anulaciones")
 
     with col_upload_3:
-        uploaded_siniestros = st.file_uploader(
-            "Sube SINIESTROS_DECESOS.xls",
-            type=["xls", "xlsx"],
-            key="siniestros",
-        )
+        uploaded_siniestros = st.file_uploader("Sube SINIESTROS_DECESOS.xls", type=["xls", "xlsx"], key="siniestros")
 
     with col_upload_4:
         uploaded_primas_emitidas = st.file_uploader(
@@ -1001,23 +1102,13 @@ def main() -> None:
             accept_multiple_files=True,
         )
 
-    st.header("Archivos Salud")
+    st.header("Archivo Salud")
 
-    col_upload_6, col_upload_7 = st.columns(2)
-
-    with col_upload_6:
-        uploaded_facturacion_salud = st.file_uploader(
-            "Sube FACTURACION_SALUD.xls",
-            type=["xls", "xlsx"],
-            key="facturacion_salud",
-        )
-
-    with col_upload_7:
-        uploaded_bajas_salud = st.file_uploader(
-            "Sube INFORME_BAJAS_SALUD.xlsx",
-            type=["xls", "xlsx"],
-            key="bajas_salud",
-        )
+    uploaded_facturacion_salud = st.file_uploader(
+        "Sube FACTURACION_SALUD.xls",
+        type=["xls", "xlsx"],
+        key="facturacion_salud",
+    )
 
     if (
         uploaded_facturacion is None
@@ -1026,9 +1117,8 @@ def main() -> None:
         or not uploaded_primas_emitidas
         or not uploaded_primas_anuladas
         or uploaded_facturacion_salud is None
-        or uploaded_bajas_salud is None
     ):
-        st.info("Sube todos los archivos para calcular Decesos y Facturacion Salud.")
+        st.info("Sube todos los archivos para calcular Decesos, Salud y los rankings.")
         st.stop()
 
     try:
@@ -1038,7 +1128,6 @@ def main() -> None:
         raw_primas_emitidas_df = read_excel_many_files(uploaded_primas_emitidas)
         raw_primas_anuladas_df = read_excel_many_files(uploaded_primas_anuladas)
         raw_facturacion_salud_df = read_excel_all_sheets(uploaded_facturacion_salud)
-        raw_bajas_salud_df = read_excel_all_sheets(uploaded_bajas_salud)
     except Exception as error:
         st.error(f"No he podido leer los archivos: {error}")
         st.stop()
@@ -1050,7 +1139,6 @@ def main() -> None:
         or raw_primas_emitidas_df.empty
         or raw_primas_anuladas_df.empty
         or raw_facturacion_salud_df.empty
-        or raw_bajas_salud_df.empty
     ):
         st.warning("Alguno de los archivos esta vacio.")
         st.stop()
@@ -1061,7 +1149,6 @@ def main() -> None:
     missing_primas_emitidas = validate_columns(raw_primas_emitidas_df, REQUIRED_PRIMAS_COLUMNS)
     missing_primas_anuladas = validate_columns(raw_primas_anuladas_df, REQUIRED_PRIMAS_COLUMNS)
     missing_facturacion_salud = validate_columns(raw_facturacion_salud_df, REQUIRED_FACTURACION_SALUD_COLUMNS)
-    missing_bajas_salud = validate_columns(raw_bajas_salud_df, REQUIRED_BAJAS_SALUD_COLUMNS)
 
     if (
         missing_facturacion
@@ -1070,30 +1157,20 @@ def main() -> None:
         or missing_primas_emitidas
         or missing_primas_anuladas
         or missing_facturacion_salud
-        or missing_bajas_salud
     ):
         messages = []
-
         if missing_facturacion:
             messages.append(f"Facturacion Decesos: {', '.join(missing_facturacion)}")
-
         if missing_anulaciones:
             messages.append(f"Anulaciones Decesos: {', '.join(missing_anulaciones)}")
-
         if missing_siniestros:
             messages.append(f"Siniestros Decesos: {', '.join(missing_siniestros)}")
-
         if missing_primas_emitidas:
             messages.append(f"Primas emitidas: {', '.join(missing_primas_emitidas)}")
-
         if missing_primas_anuladas:
             messages.append(f"Primas anuladas: {', '.join(missing_primas_anuladas)}")
-
         if missing_facturacion_salud:
             messages.append(f"Facturacion Salud: {', '.join(missing_facturacion_salud)}")
-
-        if missing_bajas_salud:
-            messages.append(f"Bajas Salud: {', '.join(missing_bajas_salud)}")
 
         st.error("Faltan columnas obligatorias. " + " | ".join(messages))
         st.stop()
@@ -1106,7 +1183,6 @@ def main() -> None:
             build_sheet_summary(raw_primas_emitidas_df, "PRIMAS_EMITIDAS"),
             build_sheet_summary(raw_primas_anuladas_df, "PRIMAS_ANULADAS"),
             build_sheet_summary(raw_facturacion_salud_df, "FACTURACION_SALUD"),
-            build_sheet_summary(raw_bajas_salud_df, "BAJAS_SALUD"),
         ],
         ignore_index=True,
     )
@@ -1116,11 +1192,7 @@ def main() -> None:
 
     product_options = sorted(
         pd.concat(
-            [
-                raw_facturacion_df["PRODUCTO"],
-                raw_anulaciones_df["PRODUCTO"],
-                raw_siniestros_df["PRODUCTO"],
-            ],
+            [raw_facturacion_df["PRODUCTO"], raw_anulaciones_df["PRODUCTO"], raw_siniestros_df["PRODUCTO"]],
             ignore_index=True,
         )
         .dropna()
@@ -1156,159 +1228,142 @@ def main() -> None:
 
     ranking_salud, salud_bruta_detail, salud_anulaciones_detail = calculate_facturacion_salud(
         raw_facturacion_salud_df,
-        raw_bajas_salud_df,
         ranking_date,
     )
+
+    ranking_liga_decesos = build_ranking_ligas_decesos(ranking)
+    ranking_liga_salud = build_ranking_ligas_salud(ranking_salud, ranking)
 
     total_altas = float(ranking["FACTURACION_ALTAS_BRUTAS"].sum()) if not ranking.empty else 0.0
     total_anulaciones = float(ranking["FACTURACION_ANULACIONES"].sum()) if not ranking.empty else 0.0
     total_neta = float(ranking["FACTURACION_NETA"].sum()) if not ranking.empty else 0.0
-    total_primas_emitidas = float(ranking["PRIMAS_EMITIDAS"].sum()) if not ranking.empty else 0.0
-    total_primas_anuladas = float(ranking["PRIMAS_ANULADAS"].sum()) if not ranking.empty else 0.0
     total_primas_netas = float(ranking["PRIMAS_NETAS"].sum()) if not ranking.empty else 0.0
     total_siniestros = float(ranking["IMPORTE_SINIESTROS"].sum()) if not ranking.empty else 0.0
-    total_polizas_netas = int(ranking["POLIZAS_NETAS"].sum()) if not ranking.empty else 0
-
     siniestralidad_total = total_siniestros / total_primas_netas if total_primas_netas > 0 else 0.0
 
     total_salud_bruta = float(ranking_salud["FACTURACION_SALUD_BRUTA"].sum()) if not ranking_salud.empty else 0.0
     total_salud_anulaciones = float(ranking_salud["FACTURACION_SALUD_ANULACIONES"].sum()) if not ranking_salud.empty else 0.0
     total_salud_neta = float(ranking_salud["FACTURACION_SALUD_NETA"].sum()) if not ranking_salud.empty else 0.0
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Facturacion altas brutas Decesos", format_euro(total_altas))
-    col2.metric("Facturacion anulaciones Decesos", format_euro(total_anulaciones))
-    col3.metric("Facturacion neta Decesos", format_euro(total_neta))
-    col4.metric("Polizas netas Decesos", f"{total_polizas_netas:,}".replace(",", "."))
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Facturacion neta Decesos", format_euro(total_neta))
+    col2.metric("Siniestralidad Decesos", format_percent(siniestralidad_total))
+    col3.metric("Facturacion neta Salud", format_euro(total_salud_neta))
 
-    col5, col6, col7, col8 = st.columns(4)
-    col5.metric("Primas emitidas Decesos", format_euro(total_primas_emitidas))
-    col6.metric("Primas anuladas Decesos", format_euro(total_primas_anuladas))
-    col7.metric("Primas netas Decesos", format_euro(total_primas_netas))
-    col8.metric("Importe siniestros Decesos", format_euro(total_siniestros))
+    col4, col5, col6 = st.columns(3)
+    col4.metric("Facturacion Salud bruta", format_euro(total_salud_bruta))
+    col5.metric("Anulaciones Salud", format_euro(total_salud_anulaciones))
+    col6.metric("Siniestros Decesos", format_euro(total_siniestros))
 
-    col9, col10 = st.columns(2)
-    col9.metric("Siniestralidad total Decesos", format_percent(siniestralidad_total))
-    col10.metric(
-        "Cumple siniestralidad global",
-        "SI" if siniestralidad_total < SINIESTRALIDAD_MAXIMA else "NO",
+    st.sidebar.title("Rankings")
+    vista = st.sidebar.radio(
+        "Selecciona vista",
+        [
+            "Ranking Decesos",
+            "Ranking Salud",
+            "Facturacion Salud",
+            "Ranking completo Decesos",
+            "Detalles",
+        ],
     )
 
-    st.subheader("Facturacion Salud")
+    if vista == "Ranking Decesos":
+        st.markdown(f"<h2 style='color:{COLOR_DECESOS};'>Ranking Decesos</h2>", unsafe_allow_html=True)
+        st.caption("LIGA PRO: desde 30.000 € de facturacion neta. LIGA ELITE: desde 60.000 €. En ambos casos debe cumplir siniestralidad inferior al 25%.")
 
-    col_salud_1, col_salud_2, col_salud_3 = st.columns(3)
-    col_salud_1.metric("Facturacion Salud bruta", format_euro(total_salud_bruta))
-    col_salud_2.metric("Anulaciones Salud", format_euro(total_salud_anulaciones))
-    col_salud_3.metric("Facturacion Salud neta", format_euro(total_salud_neta))
+        if ranking_liga_decesos.empty:
+            st.info("No hay mediadores clasificados en Ranking Decesos.")
+        else:
+            st.dataframe(style_liga_decesos(ranking_liga_decesos), use_container_width=True, hide_index=True)
 
-    if ranking_salud.empty:
-        st.info("No hay datos de Salud para los filtros seleccionados.")
+    elif vista == "Ranking Salud":
+        st.markdown(f"<h2 style='color:{COLOR_SALUD};'>Ranking Salud</h2>", unsafe_allow_html=True)
+        st.caption("LIGA PRO: Salud >= 25.000 € y Decesos >= 12.000 €. LIGA ELITE: Salud >= 80.000 € y Decesos >= 4.000 €.")
+
+        if ranking_liga_salud.empty:
+            st.info("No hay mediadores clasificados en Ranking Salud.")
+        else:
+            st.dataframe(style_liga_salud(ranking_liga_salud), use_container_width=True, hide_index=True)
+
+    elif vista == "Facturacion Salud":
+        st.subheader("Facturacion Salud")
+        if ranking_salud.empty:
+            st.info("No hay datos de Salud para los filtros seleccionados.")
+        else:
+            st.dataframe(
+                ranking_salud.style.format(
+                    {
+                        "FACTURACION_SALUD_BRUTA": lambda value: format_euro(float(value)),
+                        "FACTURACION_SALUD_ANULACIONES": lambda value: format_euro(float(value)),
+                        "FACTURACION_SALUD_NETA": lambda value: format_euro(float(value)),
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    elif vista == "Ranking completo Decesos":
+        st.subheader("Ranking facturacion neta Decesos con primas netas y siniestralidad")
+        if ranking.empty:
+            st.info("No hay datos para los filtros seleccionados.")
+        else:
+            st.dataframe(
+                ranking.style.format(
+                    {
+                        "FACTURACION_ALTAS_BRUTAS": lambda value: format_euro(float(value)),
+                        "FACTURACION_ANULACIONES": lambda value: format_euro(float(value)),
+                        "FACTURACION_NETA": lambda value: format_euro(float(value)),
+                        "PRIMAS_EMITIDAS": lambda value: format_euro(float(value)),
+                        "PRIMAS_ANULADAS": lambda value: format_euro(float(value)),
+                        "PRIMAS_NETAS": lambda value: format_euro(float(value)),
+                        "IMPORTE_SINIESTROS": lambda value: format_euro(float(value)),
+                        "SINIESTRALIDAD": lambda value: format_percent(float(value)),
+                        "PRIMA_MEDIA_NETA": lambda value: format_euro(float(value)),
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
     else:
-        st.dataframe(
-            ranking_salud.style.format(
-                {
-                    "FACTURACION_SALUD_BRUTA": lambda value: format_euro(float(value)),
-                    "FACTURACION_SALUD_ANULACIONES": lambda value: format_euro(float(value)),
-                    "FACTURACION_SALUD_NETA": lambda value: format_euro(float(value)),
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.subheader("Detalles")
 
-    st.subheader("Ranking facturacion neta Decesos con primas netas y siniestralidad")
+        with st.expander("Detalle de altas Decesos incluidas"):
+            st.dataframe(altas_detail[detail_columns_for_display(altas_detail)].style.format({"PRIMA_NETA_VALOR": lambda value: format_euro(float(value))}), use_container_width=True, hide_index=True)
 
-    if ranking.empty:
-        st.info("No hay datos para los filtros seleccionados.")
-    else:
-        st.dataframe(
-            ranking.style.format(
-                {
-                    "FACTURACION_ALTAS_BRUTAS": lambda value: format_euro(float(value)),
-                    "FACTURACION_ANULACIONES": lambda value: format_euro(float(value)),
-                    "FACTURACION_NETA": lambda value: format_euro(float(value)),
-                    "PRIMAS_EMITIDAS": lambda value: format_euro(float(value)),
-                    "PRIMAS_ANULADAS": lambda value: format_euro(float(value)),
-                    "PRIMAS_NETAS": lambda value: format_euro(float(value)),
-                    "IMPORTE_SINIESTROS": lambda value: format_euro(float(value)),
-                    "SINIESTRALIDAD": lambda value: format_percent(float(value)),
-                    "PRIMA_MEDIA_NETA": lambda value: format_euro(float(value)),
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+        with st.expander("Detalle de anulaciones Decesos incluidas"):
+            st.dataframe(anulaciones_detail[detail_columns_for_display(anulaciones_detail)].style.format({"PRIMA_NETA_VALOR": lambda value: format_euro(float(value))}), use_container_width=True, hide_index=True)
 
-    with st.expander("Detalle de altas Decesos incluidas"):
-        st.dataframe(
-            altas_detail[detail_columns_for_display(altas_detail)].style.format(
-                {"PRIMA_NETA_VALOR": lambda value: format_euro(float(value))}
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+        with st.expander("Detalle de siniestros Decesos incluidos"):
+            st.dataframe(
+                siniestros_detail[siniestros_columns_for_display(siniestros_detail)].style.format(
+                    {
+                        "PAGOSRZD_VALOR": lambda value: format_euro(float(value)),
+                        "COSTESIN_VALOR": lambda value: format_euro(float(value)),
+                        "IMPORTE_SINIESTRO": lambda value: format_euro(float(value)),
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
-    with st.expander("Detalle de anulaciones Decesos incluidas"):
-        st.dataframe(
-            anulaciones_detail[detail_columns_for_display(anulaciones_detail)].style.format(
-                {"PRIMA_NETA_VALOR": lambda value: format_euro(float(value))}
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+        with st.expander("Detalle de primas emitidas Decesos"):
+            st.dataframe(primas_emitidas_detail[primas_columns_for_display(primas_emitidas_detail)].style.format({"POLIPNET_VALOR": lambda value: format_euro(float(value))}), use_container_width=True, hide_index=True)
 
-    with st.expander("Detalle de siniestros Decesos incluidos"):
-        st.dataframe(
-            siniestros_detail[siniestros_columns_for_display(siniestros_detail)].style.format(
-                {
-                    "PAGOSRZD_VALOR": lambda value: format_euro(float(value)),
-                    "COSTESIN_VALOR": lambda value: format_euro(float(value)),
-                    "IMPORTE_SINIESTRO": lambda value: format_euro(float(value)),
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+        with st.expander("Detalle de primas anuladas Decesos"):
+            st.dataframe(primas_anuladas_detail[primas_columns_for_display(primas_anuladas_detail)].style.format({"POLIPNET_VALOR": lambda value: format_euro(float(value))}), use_container_width=True, hide_index=True)
 
-    with st.expander("Detalle de primas emitidas Decesos"):
-        st.dataframe(
-            primas_emitidas_detail[primas_columns_for_display(primas_emitidas_detail)].style.format(
-                {"POLIPNET_VALOR": lambda value: format_euro(float(value))}
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+        with st.expander("Detalle Salud - facturacion bruta"):
+            st.dataframe(salud_bruta_detail[salud_columns_for_display(salud_bruta_detail)].style.format({"PRIMA_NETA_SALUD_VALOR": lambda value: format_euro(float(value))}), use_container_width=True, hide_index=True)
 
-    with st.expander("Detalle de primas anuladas Decesos"):
-        st.dataframe(
-            primas_anuladas_detail[primas_columns_for_display(primas_anuladas_detail)].style.format(
-                {"POLIPNET_VALOR": lambda value: format_euro(float(value))}
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    with st.expander("Detalle Salud - facturacion bruta"):
-        st.dataframe(
-            salud_bruta_detail[salud_bruta_columns_for_display(salud_bruta_detail)].style.format(
-                {"PRIMA_NETA_SALUD_VALOR": lambda value: format_euro(float(value))}
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    with st.expander("Detalle Salud - anulaciones"):
-        st.dataframe(
-            salud_anulaciones_detail[salud_anulaciones_columns_for_display(salud_anulaciones_detail)].style.format(
-                {"PRIMA_NETA_SALUD_VALOR": lambda value: format_euro(float(value))}
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+        with st.expander("Detalle Salud - anulaciones"):
+            st.dataframe(salud_anulaciones_detail[salud_columns_for_display(salud_anulaciones_detail)].style.format({"PRIMA_NETA_SALUD_VALOR": lambda value: format_euro(float(value))}), use_container_width=True, hide_index=True)
 
     excel_bytes = dataframe_to_excel(
         ranking,
         ranking_salud,
+        ranking_liga_decesos,
+        ranking_liga_salud,
         altas_detail,
         anulaciones_detail,
         siniestros_detail,

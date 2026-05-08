@@ -62,6 +62,12 @@ REQUIRED_FACTURACION_SALUD_COLUMNS = (
     "FECHBAJA",
 )
 
+REQUIRED_MAPEO_COLUMNS = (
+    "CODIMEDI",
+    "NOMBCOME",
+    "Responsable",
+)
+
 AGENCY_NAME_COLUMNS = (
     "NOMBRE AGENCIA",
     "NOMBRE_AGENCIA",
@@ -193,6 +199,53 @@ def read_excel_many_files(uploaded_files) -> pd.DataFrame:
 
 def validate_columns(df: pd.DataFrame, required_columns: tuple[str, ...]) -> list[str]:
     return [column for column in required_columns if column not in df.columns]
+
+
+# =========================
+# MAPEO MEDIADORES
+# =========================
+
+def prepare_mapeo_data(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
+
+    work["AGENTE"] = work["CODIMEDI"].apply(normalize_agent)
+    work["CODIMEDI"] = work["CODIMEDI"].apply(normalize_agent)
+    work["NOMBRE_AGENCIA_MAPEO"] = work["NOMBCOME"].apply(lambda value: normalize_text(value, ""))
+    work["RESPONSABLE"] = work["Responsable"].apply(lambda value: normalize_text(value, "Sin responsable"))
+
+    mapeo = (
+        work[["AGENTE", "CODIMEDI", "NOMBRE_AGENCIA_MAPEO", "RESPONSABLE"]]
+        .drop_duplicates("AGENTE")
+        .copy()
+    )
+
+    return mapeo
+
+
+def add_mapeo_to_ranking(ranking: pd.DataFrame, mapeo: pd.DataFrame) -> pd.DataFrame:
+    if ranking.empty:
+        return ranking.copy()
+
+    result = ranking.copy()
+    result["AGENTE"] = result["AGENTE"].apply(normalize_agent)
+
+    if not mapeo.empty:
+        result = pd.merge(result, mapeo, on="AGENTE", how="left")
+    else:
+        result["CODIMEDI"] = result["AGENTE"]
+        result["NOMBRE_AGENCIA_MAPEO"] = ""
+        result["RESPONSABLE"] = "Sin responsable"
+
+    result["CODIMEDI"] = result["CODIMEDI"].fillna(result["AGENTE"])
+    result["NOMBRE_AGENCIA"] = [
+        mapped if not pd.isna(mapped) and str(mapped).strip() != "" else original
+        for mapped, original in zip(result["NOMBRE_AGENCIA_MAPEO"], result["NOMBRE_AGENCIA"])
+    ]
+    result["RESPONSABLE"] = result["RESPONSABLE"].fillna("Sin responsable")
+
+    result = result.drop(columns=["NOMBRE_AGENCIA_MAPEO"], errors="ignore")
+
+    return result
 
 
 # =========================
@@ -746,12 +799,13 @@ def classify_liga_salud(facturacion_salud: float, facturacion_decesos: float) ->
     return "No clasifica"
 
 
-def build_ranking_ligas_decesos(ranking: pd.DataFrame) -> pd.DataFrame:
+def build_ranking_decesos_top10(ranking: pd.DataFrame) -> pd.DataFrame:
     columns = [
-        "RANKING_LIGA_DECESOS",
+        "PUESTO_DECESOS",
         "LIGA_DECESOS",
-        "AGENTE",
+        "CODIMEDI",
         "NOMBRE_AGENCIA",
+        "RESPONSABLE",
         "FACTURACION_NETA",
         "SINIESTRALIDAD",
         "CUMPLE_SINIESTRALIDAD",
@@ -762,41 +816,29 @@ def build_ranking_ligas_decesos(ranking: pd.DataFrame) -> pd.DataFrame:
     if ranking.empty:
         return pd.DataFrame(columns=columns)
 
-    ranking_ligas = ranking.copy()
-    ranking_ligas["LIGA_DECESOS"] = [
+    result = ranking.copy()
+    result["LIGA_DECESOS"] = [
         classify_liga_decesos(facturacion, cumple)
-        for facturacion, cumple in zip(
-            ranking_ligas["FACTURACION_NETA"],
-            ranking_ligas["CUMPLE_SINIESTRALIDAD"],
-        )
+        for facturacion, cumple in zip(result["FACTURACION_NETA"], result["CUMPLE_SINIESTRALIDAD"])
     ]
 
-    ranking_ligas = ranking_ligas[
-        ranking_ligas["LIGA_DECESOS"].isin(["LIGA ELITE", "LIGA PRO"])
-    ].copy()
+    result = result.sort_values(
+        ["FACTURACION_NETA", "SINIESTRALIDAD", "CODIMEDI"],
+        ascending=[False, True, True],
+    ).head(10)
 
-    if ranking_ligas.empty:
-        return pd.DataFrame(columns=columns)
+    result.insert(0, "PUESTO_DECESOS", range(1, len(result) + 1))
 
-    liga_order = {"LIGA ELITE": 1, "LIGA PRO": 2}
-    ranking_ligas["ORDEN_LIGA"] = ranking_ligas["LIGA_DECESOS"].map(liga_order)
-
-    ranking_ligas = ranking_ligas.sort_values(
-        ["ORDEN_LIGA", "FACTURACION_NETA", "SINIESTRALIDAD", "AGENTE"],
-        ascending=[True, False, True, True],
-    )
-
-    ranking_ligas.insert(0, "RANKING_LIGA_DECESOS", range(1, len(ranking_ligas) + 1))
-
-    return ranking_ligas[columns]
+    return result[columns]
 
 
-def build_ranking_ligas_salud(ranking_salud: pd.DataFrame, ranking_decesos: pd.DataFrame) -> pd.DataFrame:
+def build_ranking_salud_top10(ranking_salud: pd.DataFrame, ranking_decesos: pd.DataFrame) -> pd.DataFrame:
     columns = [
-        "RANKING_LIGA_SALUD",
+        "PUESTO_SALUD",
         "LIGA_SALUD",
-        "AGENTE",
+        "CODIMEDI",
         "NOMBRE_AGENCIA",
+        "RESPONSABLE",
         "FACTURACION_SALUD_NETA",
         "FACTURACION_DECESOS_NETA",
     ]
@@ -804,50 +846,37 @@ def build_ranking_ligas_salud(ranking_salud: pd.DataFrame, ranking_decesos: pd.D
     if ranking_salud.empty:
         return pd.DataFrame(columns=columns)
 
-    salud = ranking_salud[
-        ["AGENTE", "FACTURACION_SALUD_NETA"]
-    ].copy()
+    salud = ranking_salud[["AGENTE", "FACTURACION_SALUD_NETA"]].copy()
 
     if ranking_decesos.empty:
-        decesos = pd.DataFrame(columns=["AGENTE", "NOMBRE_AGENCIA", "FACTURACION_DECESOS_NETA"])
+        decesos = pd.DataFrame(columns=["AGENTE", "CODIMEDI", "NOMBRE_AGENCIA", "RESPONSABLE", "FACTURACION_DECESOS_NETA"])
     else:
         decesos = ranking_decesos[
-            ["AGENTE", "NOMBRE_AGENCIA", "FACTURACION_NETA"]
+            ["AGENTE", "CODIMEDI", "NOMBRE_AGENCIA", "RESPONSABLE", "FACTURACION_NETA"]
         ].rename(columns={"FACTURACION_NETA": "FACTURACION_DECESOS_NETA"})
 
-    ranking_ligas = pd.merge(salud, decesos, on="AGENTE", how="left")
-    ranking_ligas["FACTURACION_DECESOS_NETA"] = ranking_ligas["FACTURACION_DECESOS_NETA"].fillna(0)
-    ranking_ligas["NOMBRE_AGENCIA"] = [
-        name if not pd.isna(name) and str(name).strip() != "" else agent
-        for name, agent in zip(ranking_ligas["NOMBRE_AGENCIA"], ranking_ligas["AGENTE"])
-    ]
+    result = pd.merge(salud, decesos, on="AGENTE", how="left")
+    result["CODIMEDI"] = result["CODIMEDI"].fillna(result["AGENTE"])
+    result["NOMBRE_AGENCIA"] = result["NOMBRE_AGENCIA"].fillna(result["AGENTE"])
+    result["RESPONSABLE"] = result["RESPONSABLE"].fillna("Sin responsable")
+    result["FACTURACION_DECESOS_NETA"] = result["FACTURACION_DECESOS_NETA"].fillna(0)
 
-    ranking_ligas["LIGA_SALUD"] = [
+    result["LIGA_SALUD"] = [
         classify_liga_salud(facturacion_salud, facturacion_decesos)
         for facturacion_salud, facturacion_decesos in zip(
-            ranking_ligas["FACTURACION_SALUD_NETA"],
-            ranking_ligas["FACTURACION_DECESOS_NETA"],
+            result["FACTURACION_SALUD_NETA"],
+            result["FACTURACION_DECESOS_NETA"],
         )
     ]
 
-    ranking_ligas = ranking_ligas[
-        ranking_ligas["LIGA_SALUD"].isin(["LIGA ELITE", "LIGA PRO"])
-    ].copy()
+    result = result.sort_values(
+        ["FACTURACION_SALUD_NETA", "FACTURACION_DECESOS_NETA", "CODIMEDI"],
+        ascending=[False, False, True],
+    ).head(10)
 
-    if ranking_ligas.empty:
-        return pd.DataFrame(columns=columns)
+    result.insert(0, "PUESTO_SALUD", range(1, len(result) + 1))
 
-    liga_order = {"LIGA ELITE": 1, "LIGA PRO": 2}
-    ranking_ligas["ORDEN_LIGA"] = ranking_ligas["LIGA_SALUD"].map(liga_order)
-
-    ranking_ligas = ranking_ligas.sort_values(
-        ["ORDEN_LIGA", "FACTURACION_SALUD_NETA", "FACTURACION_DECESOS_NETA", "AGENTE"],
-        ascending=[True, False, False, True],
-    )
-
-    ranking_ligas.insert(0, "RANKING_LIGA_SALUD", range(1, len(ranking_ligas) + 1))
-
-    return ranking_ligas[columns]
+    return result[columns]
 
 
 # =========================
@@ -1009,8 +1038,8 @@ def salud_columns_for_display(detail: pd.DataFrame) -> list[str]:
 def dataframe_to_excel(
     ranking: pd.DataFrame,
     ranking_salud: pd.DataFrame,
-    ranking_liga_decesos: pd.DataFrame,
-    ranking_liga_salud: pd.DataFrame,
+    ranking_decesos_top10: pd.DataFrame,
+    ranking_salud_top10: pd.DataFrame,
     altas_detail: pd.DataFrame,
     anulaciones_detail: pd.DataFrame,
     siniestros_detail: pd.DataFrame,
@@ -1036,14 +1065,15 @@ def dataframe_to_excel(
             {"CAMPO": "SALUD_LIGA_ELITE", "VALOR": "Facturacion Salud >= 80.000 y Facturacion Decesos >= 4.000"},
             {"CAMPO": "SALUD_BRUTA", "VALOR": "FACTURACION_SALUD con POLIEFEC dentro del periodo"},
             {"CAMPO": "SALUD_ANULACIONES", "VALOR": "FACTURACION_SALUD con ESTADO = Baja y FECHBAJA dentro del periodo"},
+            {"CAMPO": "TOP_RANKINGS", "VALOR": "Se muestran hasta 10 puestos por facturacion neta aunque no entren en liga"},
         ]
     )
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         parametros.to_excel(writer, index=False, sheet_name="PARAMETROS")
         sheet_summary.to_excel(writer, index=False, sheet_name="COMPROBACION_HOJAS")
-        ranking_liga_decesos.to_excel(writer, index=False, sheet_name="RANKING_DECESOS")
-        ranking_liga_salud.to_excel(writer, index=False, sheet_name="RANKING_SALUD")
+        ranking_decesos_top10.to_excel(writer, index=False, sheet_name="RANKING_DECESOS")
+        ranking_salud_top10.to_excel(writer, index=False, sheet_name="RANKING_SALUD")
         ranking.to_excel(writer, index=False, sheet_name="RANKING_NETO_DECESOS")
         ranking_salud.to_excel(writer, index=False, sheet_name="FACTURACION_SALUD")
         altas_detail[detail_columns_for_display(altas_detail)].to_excel(writer, index=False, sheet_name="DETALLE_ALTAS_DECESOS")
@@ -1102,13 +1132,23 @@ def main() -> None:
             accept_multiple_files=True,
         )
 
-    st.header("Archivo Salud")
+    st.header("Archivo Salud y Mapeo")
 
-    uploaded_facturacion_salud = st.file_uploader(
-        "Sube FACTURACION_SALUD.xls",
-        type=["xls", "xlsx"],
-        key="facturacion_salud",
-    )
+    col_upload_6, col_upload_7 = st.columns(2)
+
+    with col_upload_6:
+        uploaded_facturacion_salud = st.file_uploader(
+            "Sube FACTURACION_SALUD.xls",
+            type=["xls", "xlsx"],
+            key="facturacion_salud",
+        )
+
+    with col_upload_7:
+        uploaded_mapeo = st.file_uploader(
+            "Sube MAPEO_MEDIADORES.xlsx",
+            type=["xls", "xlsx"],
+            key="mapeo_mediadores",
+        )
 
     if (
         uploaded_facturacion is None
@@ -1117,8 +1157,9 @@ def main() -> None:
         or not uploaded_primas_emitidas
         or not uploaded_primas_anuladas
         or uploaded_facturacion_salud is None
+        or uploaded_mapeo is None
     ):
-        st.info("Sube todos los archivos para calcular Decesos, Salud y los rankings.")
+        st.info("Sube todos los archivos para calcular Decesos, Salud, mapeo y rankings.")
         st.stop()
 
     try:
@@ -1128,6 +1169,7 @@ def main() -> None:
         raw_primas_emitidas_df = read_excel_many_files(uploaded_primas_emitidas)
         raw_primas_anuladas_df = read_excel_many_files(uploaded_primas_anuladas)
         raw_facturacion_salud_df = read_excel_all_sheets(uploaded_facturacion_salud)
+        raw_mapeo_df = read_excel_all_sheets(uploaded_mapeo)
     except Exception as error:
         st.error(f"No he podido leer los archivos: {error}")
         st.stop()
@@ -1139,6 +1181,7 @@ def main() -> None:
         or raw_primas_emitidas_df.empty
         or raw_primas_anuladas_df.empty
         or raw_facturacion_salud_df.empty
+        or raw_mapeo_df.empty
     ):
         st.warning("Alguno de los archivos esta vacio.")
         st.stop()
@@ -1149,6 +1192,7 @@ def main() -> None:
     missing_primas_emitidas = validate_columns(raw_primas_emitidas_df, REQUIRED_PRIMAS_COLUMNS)
     missing_primas_anuladas = validate_columns(raw_primas_anuladas_df, REQUIRED_PRIMAS_COLUMNS)
     missing_facturacion_salud = validate_columns(raw_facturacion_salud_df, REQUIRED_FACTURACION_SALUD_COLUMNS)
+    missing_mapeo = validate_columns(raw_mapeo_df, REQUIRED_MAPEO_COLUMNS)
 
     if (
         missing_facturacion
@@ -1157,6 +1201,7 @@ def main() -> None:
         or missing_primas_emitidas
         or missing_primas_anuladas
         or missing_facturacion_salud
+        or missing_mapeo
     ):
         messages = []
         if missing_facturacion:
@@ -1171,9 +1216,13 @@ def main() -> None:
             messages.append(f"Primas anuladas: {', '.join(missing_primas_anuladas)}")
         if missing_facturacion_salud:
             messages.append(f"Facturacion Salud: {', '.join(missing_facturacion_salud)}")
+        if missing_mapeo:
+            messages.append(f"Mapeo mediadores: {', '.join(missing_mapeo)}")
 
         st.error("Faltan columnas obligatorias. " + " | ".join(messages))
         st.stop()
+
+    mapeo = prepare_mapeo_data(raw_mapeo_df)
 
     sheet_summary = pd.concat(
         [
@@ -1183,6 +1232,7 @@ def main() -> None:
             build_sheet_summary(raw_primas_emitidas_df, "PRIMAS_EMITIDAS"),
             build_sheet_summary(raw_primas_anuladas_df, "PRIMAS_ANULADAS"),
             build_sheet_summary(raw_facturacion_salud_df, "FACTURACION_SALUD"),
+            build_sheet_summary(raw_mapeo_df, "MAPEO_MEDIADORES"),
         ],
         ignore_index=True,
     )
@@ -1226,16 +1276,16 @@ def main() -> None:
         excluded_products,
     )
 
+    ranking = add_mapeo_to_ranking(ranking, mapeo)
+
     ranking_salud, salud_bruta_detail, salud_anulaciones_detail = calculate_facturacion_salud(
         raw_facturacion_salud_df,
         ranking_date,
     )
 
-    ranking_liga_decesos = build_ranking_ligas_decesos(ranking)
-    ranking_liga_salud = build_ranking_ligas_salud(ranking_salud, ranking)
+    ranking_decesos_top10 = build_ranking_decesos_top10(ranking)
+    ranking_salud_top10 = build_ranking_salud_top10(ranking_salud, ranking)
 
-    total_altas = float(ranking["FACTURACION_ALTAS_BRUTAS"].sum()) if not ranking.empty else 0.0
-    total_anulaciones = float(ranking["FACTURACION_ANULACIONES"].sum()) if not ranking.empty else 0.0
     total_neta = float(ranking["FACTURACION_NETA"].sum()) if not ranking.empty else 0.0
     total_primas_netas = float(ranking["PRIMAS_NETAS"].sum()) if not ranking.empty else 0.0
     total_siniestros = float(ranking["IMPORTE_SINIESTROS"].sum()) if not ranking.empty else 0.0
@@ -1269,21 +1319,21 @@ def main() -> None:
 
     if vista == "Ranking Decesos":
         st.markdown(f"<h2 style='color:{COLOR_DECESOS};'>Ranking Decesos</h2>", unsafe_allow_html=True)
-        st.caption("LIGA PRO: desde 30.000 € de facturacion neta. LIGA ELITE: desde 60.000 €. En ambos casos debe cumplir siniestralidad inferior al 25%.")
+        st.caption("Top 10 por facturacion neta. LIGA PRO: desde 30.000 €. LIGA ELITE: desde 60.000 €. En ambos casos debe cumplir siniestralidad inferior al 25%.")
 
-        if ranking_liga_decesos.empty:
-            st.info("No hay mediadores clasificados en Ranking Decesos.")
+        if ranking_decesos_top10.empty:
+            st.info("No hay datos en Ranking Decesos.")
         else:
-            st.dataframe(style_liga_decesos(ranking_liga_decesos), use_container_width=True, hide_index=True)
+            st.dataframe(style_liga_decesos(ranking_decesos_top10), use_container_width=True, hide_index=True)
 
     elif vista == "Ranking Salud":
         st.markdown(f"<h2 style='color:{COLOR_SALUD};'>Ranking Salud</h2>", unsafe_allow_html=True)
-        st.caption("LIGA PRO: Salud >= 25.000 € y Decesos >= 12.000 €. LIGA ELITE: Salud >= 80.000 € y Decesos >= 4.000 €.")
+        st.caption("Top 10 por facturacion neta Salud. LIGA PRO: Salud >= 25.000 € y Decesos >= 12.000 €. LIGA ELITE: Salud >= 80.000 € y Decesos >= 4.000 €.")
 
-        if ranking_liga_salud.empty:
-            st.info("No hay mediadores clasificados en Ranking Salud.")
+        if ranking_salud_top10.empty:
+            st.info("No hay datos en Ranking Salud.")
         else:
-            st.dataframe(style_liga_salud(ranking_liga_salud), use_container_width=True, hide_index=True)
+            st.dataframe(style_liga_salud(ranking_salud_top10), use_container_width=True, hide_index=True)
 
     elif vista == "Facturacion Salud":
         st.subheader("Facturacion Salud")
@@ -1362,8 +1412,8 @@ def main() -> None:
     excel_bytes = dataframe_to_excel(
         ranking,
         ranking_salud,
-        ranking_liga_decesos,
-        ranking_liga_salud,
+        ranking_decesos_top10,
+        ranking_salud_top10,
         altas_detail,
         anulaciones_detail,
         siniestros_detail,

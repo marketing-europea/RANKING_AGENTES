@@ -440,7 +440,10 @@ def prepare_siniestros_data(df: pd.DataFrame) -> pd.DataFrame:
 
     work["PAGOSRZD_VALOR"] = work["PAGOSRZD"].apply(parse_spanish_number)
     work["COSTESIN_VALOR"] = work["COSTESIN"].apply(parse_spanish_number)
-    work["IMPORTE_SINIESTRO"] = work["PAGOSRZD_VALOR"] + work["COSTESIN_VALOR"]
+
+    # Nueva lógica:
+    # Para siniestralidad solo contamos pagos realizados.
+    work["IMPORTE_SINIESTRO"] = work["PAGOSRZD_VALOR"]
 
     return work
 

@@ -624,38 +624,35 @@ def prepare_bajas_salud_data(df: pd.DataFrame) -> pd.DataFrame:
 
 def calculate_facturacion_salud(
     facturacion_salud_df: pd.DataFrame,
-    bajas_salud_df: pd.DataFrame,
     ranking_date: date,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     facturacion_detail = prepare_facturacion_salud_data(facturacion_salud_df)
-    bajas_detail = prepare_bajas_salud_data(bajas_salud_df)
 
-    altas_mask = (
+    facturacion_detail["ESTADO_NORMALIZADO"] = facturacion_detail["ESTADO"].apply(normalize_product)
+
+    facturacion_detail["FECHA_BAJA_SALUD"] = pd.to_datetime(
+        facturacion_detail["FECHBAJA"],
+        dayfirst=True,
+        errors="coerce",
+    )
+    facturacion_detail["ANIO_BAJA_SALUD"] = facturacion_detail["FECHA_BAJA_SALUD"].dt.year
+    facturacion_detail["MES_BAJA_SALUD"] = facturacion_detail["FECHA_BAJA_SALUD"].dt.month
+
+    bruta_mask = (
         facturacion_detail["FECHA_EFECTO_SALUD"].notna()
         & facturacion_detail["ANIO_SALUD"].eq(ranking_date.year)
         & facturacion_detail["MES_SALUD"].le(ranking_date.month)
     )
 
-    salud_bruta_detail = facturacion_detail[altas_mask].copy()
-
-    bajas_mask = (
-        bajas_detail["FECHA_BAJA_SALUD"].notna()
-        & bajas_detail["ANIO_BAJA_SALUD"].eq(ranking_date.year)
-        & bajas_detail["MES_BAJA_SALUD"].le(ranking_date.month)
-        & bajas_detail["FECHA_REACTIVACION_SALUD"].isna()
-        & ~bajas_detail["DES_PRODUCTO_NORMALIZADO"].eq("ASISA VIDA RIESGO")
+    anulaciones_mask = (
+        facturacion_detail["FECHA_BAJA_SALUD"].notna()
+        & facturacion_detail["ANIO_BAJA_SALUD"].eq(ranking_date.year)
+        & facturacion_detail["MES_BAJA_SALUD"].le(ranking_date.month)
+        & facturacion_detail["ESTADO_NORMALIZADO"].eq("BAJA")
     )
 
-    bajas_validas = bajas_detail[bajas_mask].copy()
-    bajas_validas = bajas_validas.drop_duplicates("POLIZA_NORMALIZADA")
-
-    salud_anulaciones_detail = pd.merge(
-        facturacion_detail,
-        bajas_validas,
-        on="POLIZA_NORMALIZADA",
-        how="inner",
-        suffixes=("", "_BAJA"),
-    )
+    salud_bruta_detail = facturacion_detail[bruta_mask].copy()
+    salud_anulaciones_detail = facturacion_detail[anulaciones_mask].copy()
 
     salud_bruta = (
         salud_bruta_detail.groupby("AGENTE", dropna=False)

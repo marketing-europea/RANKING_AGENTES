@@ -328,6 +328,20 @@ def prepare_decesos_data(
     )
     work["ANIO_MOVIMIENTO"] = work["FECHA_MOVIMIENTO"].dt.year
     work["MES_MOVIMIENTO"] = work["FECHA_MOVIMIENTO"].dt.month
+
+    if movement == "ANULACION":
+        # Regla de imputacion Decesos:
+        # las bajas con FECHA EMISION entre el 1 y el 25 de enero
+        # se imputan al ejercicio anterior.
+        enero_hasta_25 = (
+            work["FECHA_MOVIMIENTO"].notna()
+            & work["FECHA_MOVIMIENTO"].dt.month.eq(1)
+            & work["FECHA_MOVIMIENTO"].dt.day.le(25)
+        )
+        work.loc[enero_hasta_25, "ANIO_MOVIMIENTO"] = (
+            work.loc[enero_hasta_25, "ANIO_MOVIMIENTO"] - 1
+        )
+
     work["PRIMA_NETA_VALOR"] = work["PRIMA NETA"].apply(parse_spanish_number)
 
     return work
@@ -1337,6 +1351,7 @@ def dataframe_to_excel(
             {"CAMPO": "ANIO", "VALOR": ranking_date.year},
             {"CAMPO": "MES_HASTA", "VALOR": ranking_date.month},
             {"CAMPO": "PRODUCTOS_EXCLUIDOS", "VALOR": ", ".join(excluded_products)},
+            {"CAMPO": "REGLA_ANULACIONES_DECESOS", "VALOR": "FECHA EMISION del 1 al 25 de enero se imputa al año anterior"},
             {"CAMPO": "DECESOS_LIGA_PRO", "VALOR": "Facturacion neta >= 30.000 y siniestralidad < 25%"},
             {"CAMPO": "DECESOS_LIGA_ELITE", "VALOR": "Facturacion neta >= 60.000 y siniestralidad < 25%"},
             {"CAMPO": "SALUD_LIGA_PRO", "VALOR": "Facturacion Salud >= 25.000 y Facturacion Decesos >= 12.000"},

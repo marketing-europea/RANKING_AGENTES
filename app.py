@@ -21,6 +21,7 @@ SALUD_LIGA_ELITE_DECESOS_MINIMA = 4000.0
 
 COLOR_DECESOS = "#f32735"
 COLOR_SALUD = "#5271ff"
+COLOR_VIDA = "#ffb4ab"
 
 REQUIRED_FACTURACION_COLUMNS = (
     "PRODUCTO",
@@ -71,6 +72,13 @@ REQUIRED_MAPEO_COLUMNS = (
     "CODIMEDI",
     "NOMBCOME",
     "Responsable",
+)
+
+REQUIRED_FACTURACION_VIDA_COLUMNS = (
+    "NUMERO",
+    "CODIMEDI",
+    "FECHALTA",
+    "PRIMATOTAL",
 )
 
 AGENCY_NAME_COLUMNS = (
@@ -245,6 +253,32 @@ def add_mapeo_to_ranking(ranking: pd.DataFrame, mapeo: pd.DataFrame) -> pd.DataF
     result["NOMBRE_AGENCIA"] = [
         mapped if not pd.isna(mapped) and str(mapped).strip() != "" else original
         for mapped, original in zip(result["NOMBRE_AGENCIA_MAPEO"], result["NOMBRE_AGENCIA"])
+    ]
+    result["RESPONSABLE"] = result["RESPONSABLE"].fillna("Sin responsable")
+
+    result = result.drop(columns=["NOMBRE_AGENCIA_MAPEO"], errors="ignore")
+
+    return result
+
+
+def add_mapeo_to_simple_ranking(ranking: pd.DataFrame, mapeo: pd.DataFrame) -> pd.DataFrame:
+    if ranking.empty:
+        return ranking.copy()
+
+    result = ranking.copy()
+    result["AGENTE"] = result["AGENTE"].apply(normalize_agent)
+
+    if not mapeo.empty:
+        result = pd.merge(result, mapeo, on="AGENTE", how="left")
+    else:
+        result["CODIMEDI"] = result["AGENTE"]
+        result["NOMBRE_AGENCIA_MAPEO"] = ""
+        result["RESPONSABLE"] = "Sin responsable"
+
+    result["CODIMEDI"] = result["CODIMEDI"].fillna(result["AGENTE"])
+    result["NOMBRE_AGENCIA"] = [
+        mapped if not pd.isna(mapped) and str(mapped).strip() != "" else agent
+        for mapped, agent in zip(result["NOMBRE_AGENCIA_MAPEO"], result["AGENTE"])
     ]
     result["RESPONSABLE"] = result["RESPONSABLE"].fillna("Sin responsable")
 
@@ -800,6 +834,133 @@ def calculate_facturacion_salud(
 
 
 # =========================
+# VIDA
+# =========================
+
+def prepare_facturacion_vida_data(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
+
+    work["AGENTE"] = work["CODIMEDI"].apply(normalize_agent)
+    work["POLIZA_NORMALIZADA"] = work["NUMERO"].apply(lambda value: normalize_text(value, ""))
+    work["FECHA_ALTA_VIDA"] = pd.to_datetime(
+        work["FECHALTA"],
+        dayfirst=True,
+        errors="coerce",
+    )
+    work["ANIO_VIDA"] = work["FECHA_ALTA_VIDA"].dt.year
+    work["MES_VIDA"] = work["FECHA_ALTA_VIDA"].dt.month
+    work["PRIMA_VIDA_VALOR"] = work["PRIMATOTAL"].apply(parse_spanish_number)
+
+    return work
+
+
+def calculate_facturacion_vida(
+    facturacion_vida_df: pd.DataFrame,
+    bajas_salud_df: pd.DataFrame,
+    ranking_date: date,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    facturacion_detail = prepare_facturacion_vida_data(facturacion_vida_df)
+    bajas_detail = prepare_bajas_salud_data(bajas_salud_df)
+
+    bruta_mask = (
+        facturacion_detail["FECHA_ALTA_VIDA"].notna()
+        & facturacion_detail["ANIO_VIDA"].eq(ranking_date.year)
+        & facturacion_detail["MES_VIDA"].le(ranking_date.month)
+    )
+
+    vida_bruta_detail = facturacion_detail[bruta_mask].copy()
+
+    bajas_mask = (
+        bajas_detail["FECHA_BAJA_SALUD"].notna()
+        & bajas_detail["ANIO_BAJA_SALUD"].eq(ranking_date.year)
+        & bajas_detail["MES_BAJA_SALUD"].le(ranking_date.month)
+        & bajas_detail["FECHA_REACTIVACION_SALUD"].isna()
+        & bajas_detail["DES_PRODUCTO_NORMALIZADO"].eq("ASISA VIDA RIESGO")
+    )
+
+    bajas_validas = bajas_detail[bajas_mask].copy()
+    bajas_validas = bajas_validas.drop_duplicates("POLIZA_NORMALIZADA")
+
+    vida_anulaciones_detail = pd.merge(
+        facturacion_detail,
+        bajas_validas,
+        on="POLIZA_NORMALIZADA",
+        how="inner",
+        suffixes=("", "_BAJA"),
+    )
+
+    vida_bruta = (
+        vida_bruta_detail.groupby("AGENTE", dropna=False)
+        .agg(
+            FACTURACION_VIDA_BRUTA=("PRIMA_VIDA_VALOR", "sum"),
+            POLIZAS_VIDA_BRUTAS=("POLIZA_NORMALIZADA", "nunique"),
+        )
+        .reset_index()
+    )
+
+    vida_anulaciones = (
+        vida_anulaciones_detail.groupby("AGENTE", dropna=False)
+        .agg(
+            FACTURACION_VIDA_ANULACIONES=("PRIMA_VIDA_VALOR", "sum"),
+            POLIZAS_VIDA_ANULADAS=("POLIZA_NORMALIZADA", "nunique"),
+        )
+        .reset_index()
+    )
+
+    ranking_vida = pd.merge(
+        vida_bruta,
+        vida_anulaciones,
+        on="AGENTE",
+        how="outer",
+    )
+
+    if ranking_vida.empty:
+        return (
+            pd.DataFrame(
+                columns=[
+                    "RANKING_VIDA",
+                    "AGENTE",
+                    "FACTURACION_VIDA_BRUTA",
+                    "FACTURACION_VIDA_ANULACIONES",
+                    "FACTURACION_VIDA_NETA",
+                    "POLIZAS_VIDA_BRUTAS",
+                    "POLIZAS_VIDA_ANULADAS",
+                    "POLIZAS_VIDA_NETAS",
+                ]
+            ),
+            vida_bruta_detail,
+            vida_anulaciones_detail,
+        )
+
+    for column in [
+        "FACTURACION_VIDA_BRUTA",
+        "FACTURACION_VIDA_ANULACIONES",
+        "POLIZAS_VIDA_BRUTAS",
+        "POLIZAS_VIDA_ANULADAS",
+    ]:
+        ranking_vida[column] = ranking_vida[column].fillna(0)
+
+    ranking_vida["FACTURACION_VIDA_NETA"] = (
+        ranking_vida["FACTURACION_VIDA_BRUTA"]
+        - ranking_vida["FACTURACION_VIDA_ANULACIONES"]
+    )
+
+    ranking_vida["POLIZAS_VIDA_NETAS"] = (
+        ranking_vida["POLIZAS_VIDA_BRUTAS"]
+        - ranking_vida["POLIZAS_VIDA_ANULADAS"]
+    )
+
+    ranking_vida = ranking_vida.sort_values(
+        ["FACTURACION_VIDA_NETA", "AGENTE"],
+        ascending=[False, True],
+    )
+
+    ranking_vida.insert(0, "RANKING_VIDA", range(1, len(ranking_vida) + 1))
+
+    return ranking_vida, vida_bruta_detail, vida_anulaciones_detail
+
+
+# =========================
 # LIGAS
 # =========================
 
@@ -879,19 +1040,24 @@ def build_ranking_salud_top10(ranking_salud: pd.DataFrame, ranking_decesos: pd.D
     if ranking_salud.empty:
         return pd.DataFrame(columns=columns)
 
-    salud = ranking_salud[["AGENTE", "FACTURACION_SALUD_NETA"]].copy()
+    salud_columns = ["AGENTE", "CODIMEDI", "NOMBRE_AGENCIA", "RESPONSABLE", "FACTURACION_SALUD_NETA"]
+    salud = ranking_salud[[column for column in salud_columns if column in ranking_salud.columns]].copy()
+
+    if "CODIMEDI" not in salud.columns:
+        salud["CODIMEDI"] = salud["AGENTE"]
+    if "NOMBRE_AGENCIA" not in salud.columns:
+        salud["NOMBRE_AGENCIA"] = salud["AGENTE"]
+    if "RESPONSABLE" not in salud.columns:
+        salud["RESPONSABLE"] = "Sin responsable"
 
     if ranking_decesos.empty:
-        decesos = pd.DataFrame(columns=["AGENTE", "CODIMEDI", "NOMBRE_AGENCIA", "RESPONSABLE", "FACTURACION_DECESOS_NETA"])
+        decesos = pd.DataFrame(columns=["AGENTE", "FACTURACION_DECESOS_NETA"])
     else:
-        decesos = ranking_decesos[
-            ["AGENTE", "CODIMEDI", "NOMBRE_AGENCIA", "RESPONSABLE", "FACTURACION_NETA"]
-        ].rename(columns={"FACTURACION_NETA": "FACTURACION_DECESOS_NETA"})
+        decesos = ranking_decesos[["AGENTE", "FACTURACION_NETA"]].rename(
+            columns={"FACTURACION_NETA": "FACTURACION_DECESOS_NETA"}
+        )
 
     result = pd.merge(salud, decesos, on="AGENTE", how="left")
-    result["CODIMEDI"] = result["CODIMEDI"].fillna(result["AGENTE"])
-    result["NOMBRE_AGENCIA"] = result["NOMBRE_AGENCIA"].fillna(result["AGENTE"])
-    result["RESPONSABLE"] = result["RESPONSABLE"].fillna("Sin responsable")
     result["FACTURACION_DECESOS_NETA"] = result["FACTURACION_DECESOS_NETA"].fillna(0)
 
     result["LIGA_SALUD"] = [
@@ -908,6 +1074,40 @@ def build_ranking_salud_top10(ranking_salud: pd.DataFrame, ranking_decesos: pd.D
     ).head(10)
 
     result.insert(0, "PUESTO_SALUD", range(1, len(result) + 1))
+
+    return result[columns]
+
+
+def build_ranking_vida_top10(ranking_vida: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "PUESTO_VIDA",
+        "CODIMEDI",
+        "NOMBRE_AGENCIA",
+        "RESPONSABLE",
+        "FACTURACION_VIDA_NETA",
+        "FACTURACION_VIDA_BRUTA",
+        "FACTURACION_VIDA_ANULACIONES",
+        "POLIZAS_VIDA_NETAS",
+    ]
+
+    if ranking_vida.empty:
+        return pd.DataFrame(columns=columns)
+
+    result = ranking_vida.copy()
+
+    if "CODIMEDI" not in result.columns:
+        result["CODIMEDI"] = result["AGENTE"]
+    if "NOMBRE_AGENCIA" not in result.columns:
+        result["NOMBRE_AGENCIA"] = result["AGENTE"]
+    if "RESPONSABLE" not in result.columns:
+        result["RESPONSABLE"] = "Sin responsable"
+
+    result = result.sort_values(
+        ["FACTURACION_VIDA_NETA", "CODIMEDI"],
+        ascending=[False, True],
+    ).head(10)
+
+    result.insert(0, "PUESTO_VIDA", range(1, len(result) + 1))
 
     return result[columns]
 
@@ -970,6 +1170,19 @@ def style_liga_salud(df: pd.DataFrame):
     ).set_properties(
         subset=["LIGA_SALUD"],
         **{"background-color": COLOR_SALUD, "color": "white", "font-weight": "bold"},
+    )
+
+
+def style_ranking_vida(df: pd.DataFrame):
+    return df.style.format(
+        {
+            "FACTURACION_VIDA_NETA": lambda value: format_euro(float(value)),
+            "FACTURACION_VIDA_BRUTA": lambda value: format_euro(float(value)),
+            "FACTURACION_VIDA_ANULACIONES": lambda value: format_euro(float(value)),
+        }
+    ).set_properties(
+        subset=["PUESTO_VIDA"],
+        **{"background-color": COLOR_VIDA, "color": "black", "font-weight": "bold"},
     )
 
 
@@ -1069,11 +1282,40 @@ def salud_columns_for_display(detail: pd.DataFrame) -> list[str]:
     return [column for column in columns if column in detail.columns]
 
 
+def vida_columns_for_display(detail: pd.DataFrame) -> list[str]:
+    columns = [
+        "ARCHIVO_ORIGEN",
+        "HOJA_ORIGEN",
+        "NUMERO",
+        "POLIZA_NORMALIZADA",
+        "CODIMEDI",
+        "AGENTE",
+        "ESTADO",
+        "FECHALTA",
+        "FECHA_ALTA_VIDA",
+        "GARANTIA",
+        "PRIMATOTAL",
+        "PRIMA_VIDA_VALOR",
+        "NOMBRE",
+        "APE1",
+        "APE2",
+        "NUMEDOCU",
+        "DES_PRODUCTO",
+        "FEC_EFECTO_BAJA",
+        "FEC_EFECTO_REACTIV",
+        "MOTIVO_BAJA",
+    ]
+
+    return [column for column in columns if column in detail.columns]
+
+
 def dataframe_to_excel(
     ranking: pd.DataFrame,
     ranking_salud: pd.DataFrame,
+    ranking_vida: pd.DataFrame,
     ranking_decesos_top10: pd.DataFrame,
     ranking_salud_top10: pd.DataFrame,
+    ranking_vida_top10: pd.DataFrame,
     altas_detail: pd.DataFrame,
     anulaciones_detail: pd.DataFrame,
     siniestros_detail: pd.DataFrame,
@@ -1081,6 +1323,8 @@ def dataframe_to_excel(
     primas_anuladas_detail: pd.DataFrame,
     salud_bruta_detail: pd.DataFrame,
     salud_anulaciones_detail: pd.DataFrame,
+    vida_bruta_detail: pd.DataFrame,
+    vida_anulaciones_detail: pd.DataFrame,
     sheet_summary: pd.DataFrame,
     ranking_date: date,
     excluded_products: list[str],
@@ -1099,6 +1343,8 @@ def dataframe_to_excel(
             {"CAMPO": "SALUD_LIGA_ELITE", "VALOR": "Facturacion Salud >= 80.000 y Facturacion Decesos >= 4.000"},
             {"CAMPO": "SALUD_BRUTA", "VALOR": "FACTURACION_SALUD con POLIEFEC dentro del periodo"},
             {"CAMPO": "SALUD_ANULACIONES", "VALOR": "INFORME_BAJAS_SALUD con FEC_EFECTO_BAJA dentro del periodo, sin FEC_EFECTO_REACTIV y excluyendo ASISA VIDA RIESGO"},
+            {"CAMPO": "VIDA_BRUTA", "VALOR": "FACTURACION_VIDA con FECHALTA dentro del periodo y PRIMATOTAL como importe"},
+            {"CAMPO": "VIDA_ANULACIONES", "VALOR": "INFORME_BAJAS_SALUD filtrando DES_PRODUCTO = ASISA VIDA RIESGO"},
             {"CAMPO": "TOP_RANKINGS", "VALOR": "Se muestran hasta 10 puestos por facturacion neta aunque no entren en liga"},
         ]
     )
@@ -1108,8 +1354,10 @@ def dataframe_to_excel(
         sheet_summary.to_excel(writer, index=False, sheet_name="COMPROBACION_HOJAS")
         ranking_decesos_top10.to_excel(writer, index=False, sheet_name="RANKING_DECESOS")
         ranking_salud_top10.to_excel(writer, index=False, sheet_name="RANKING_SALUD")
+        ranking_vida_top10.to_excel(writer, index=False, sheet_name="RANKING_VIDA")
         ranking.to_excel(writer, index=False, sheet_name="RANKING_NETO_DECESOS")
         ranking_salud.to_excel(writer, index=False, sheet_name="FACTURACION_SALUD")
+        ranking_vida.to_excel(writer, index=False, sheet_name="FACTURACION_VIDA")
         altas_detail[detail_columns_for_display(altas_detail)].to_excel(writer, index=False, sheet_name="DETALLE_ALTAS_DECESOS")
         anulaciones_detail[detail_columns_for_display(anulaciones_detail)].to_excel(writer, index=False, sheet_name="DETALLE_ANUL_DECESOS")
         siniestros_detail[siniestros_columns_for_display(siniestros_detail)].to_excel(writer, index=False, sheet_name="DETALLE_SINIESTROS")
@@ -1117,6 +1365,8 @@ def dataframe_to_excel(
         primas_anuladas_detail[primas_columns_for_display(primas_anuladas_detail)].to_excel(writer, index=False, sheet_name="DETALLE_PRIMAS_ANUL")
         salud_bruta_detail[salud_columns_for_display(salud_bruta_detail)].to_excel(writer, index=False, sheet_name="DETALLE_SALUD_BRUTA")
         salud_anulaciones_detail[salud_columns_for_display(salud_anulaciones_detail)].to_excel(writer, index=False, sheet_name="DETALLE_SALUD_ANUL")
+        vida_bruta_detail[vida_columns_for_display(vida_bruta_detail)].to_excel(writer, index=False, sheet_name="DETALLE_VIDA_BRUTA")
+        vida_anulaciones_detail[vida_columns_for_display(vida_anulaciones_detail)].to_excel(writer, index=False, sheet_name="DETALLE_VIDA_ANUL")
 
     return output.getvalue()
 
@@ -1166,9 +1416,9 @@ def main() -> None:
             accept_multiple_files=True,
         )
 
-    st.header("Archivos Salud y Mapeo")
+    st.header("Archivos Salud, Vida y Mapeo")
 
-    col_upload_6, col_upload_7, col_upload_8 = st.columns(3)
+    col_upload_6, col_upload_7, col_upload_8, col_upload_9 = st.columns(4)
 
     with col_upload_6:
         uploaded_facturacion_salud = st.file_uploader(
@@ -1185,6 +1435,13 @@ def main() -> None:
         )
 
     with col_upload_8:
+        uploaded_facturacion_vida = st.file_uploader(
+            "Sube FACTURACION_VIDA.xls",
+            type=["xls", "xlsx"],
+            key="facturacion_vida",
+        )
+
+    with col_upload_9:
         uploaded_mapeo = st.file_uploader(
             "Sube MAPEO_MEDIADORES.xlsx",
             type=["xls", "xlsx"],
@@ -1199,6 +1456,7 @@ def main() -> None:
         or not uploaded_primas_anuladas
         or uploaded_facturacion_salud is None
         or uploaded_bajas_salud is None
+        or uploaded_facturacion_vida is None
         or uploaded_mapeo is None
     ):
         st.info("Sube todos los archivos para calcular Decesos, Salud, mapeo y rankings.")
@@ -1212,6 +1470,7 @@ def main() -> None:
         raw_primas_anuladas_df = read_excel_many_files(uploaded_primas_anuladas)
         raw_facturacion_salud_df = read_excel_all_sheets(uploaded_facturacion_salud)
         raw_bajas_salud_df = read_excel_all_sheets(uploaded_bajas_salud)
+        raw_facturacion_vida_df = read_excel_all_sheets(uploaded_facturacion_vida)
         raw_mapeo_df = read_excel_all_sheets(uploaded_mapeo)
     except Exception as error:
         st.error(f"No he podido leer los archivos: {error}")
@@ -1225,6 +1484,7 @@ def main() -> None:
         or raw_primas_anuladas_df.empty
         or raw_facturacion_salud_df.empty
         or raw_bajas_salud_df.empty
+        or raw_facturacion_vida_df.empty
         or raw_mapeo_df.empty
     ):
         st.warning("Alguno de los archivos esta vacio.")
@@ -1237,6 +1497,7 @@ def main() -> None:
     missing_primas_anuladas = validate_columns(raw_primas_anuladas_df, REQUIRED_PRIMAS_COLUMNS)
     missing_facturacion_salud = validate_columns(raw_facturacion_salud_df, REQUIRED_FACTURACION_SALUD_COLUMNS)
     missing_bajas_salud = validate_columns(raw_bajas_salud_df, REQUIRED_BAJAS_SALUD_COLUMNS)
+    missing_facturacion_vida = validate_columns(raw_facturacion_vida_df, REQUIRED_FACTURACION_VIDA_COLUMNS)
     missing_mapeo = validate_columns(raw_mapeo_df, REQUIRED_MAPEO_COLUMNS)
 
     if (
@@ -1247,6 +1508,7 @@ def main() -> None:
         or missing_primas_anuladas
         or missing_facturacion_salud
         or missing_bajas_salud
+        or missing_facturacion_vida
         or missing_mapeo
     ):
         messages = []
@@ -1264,6 +1526,8 @@ def main() -> None:
             messages.append(f"Facturacion Salud: {', '.join(missing_facturacion_salud)}")
         if missing_bajas_salud:
             messages.append(f"Bajas Salud: {', '.join(missing_bajas_salud)}")
+        if missing_facturacion_vida:
+            messages.append(f"Facturacion Vida: {', '.join(missing_facturacion_vida)}")
         if missing_mapeo:
             messages.append(f"Mapeo mediadores: {', '.join(missing_mapeo)}")
 
@@ -1281,6 +1545,7 @@ def main() -> None:
             build_sheet_summary(raw_primas_anuladas_df, "PRIMAS_ANULADAS"),
             build_sheet_summary(raw_facturacion_salud_df, "FACTURACION_SALUD"),
             build_sheet_summary(raw_bajas_salud_df, "BAJAS_SALUD"),
+            build_sheet_summary(raw_facturacion_vida_df, "FACTURACION_VIDA"),
             build_sheet_summary(raw_mapeo_df, "MAPEO_MEDIADORES"),
         ],
         ignore_index=True,
@@ -1332,9 +1597,19 @@ def main() -> None:
         raw_bajas_salud_df,
         ranking_date,
     )
+    ranking_salud = add_mapeo_to_simple_ranking(ranking_salud, mapeo)
+
+    ranking_vida, vida_bruta_detail, vida_anulaciones_detail = calculate_facturacion_vida(
+        raw_facturacion_vida_df,
+        raw_bajas_salud_df,
+        ranking_date,
+    )
+
+    ranking_vida = add_mapeo_to_simple_ranking(ranking_vida, mapeo)
 
     ranking_decesos_top10 = build_ranking_decesos_top10(ranking)
     ranking_salud_top10 = build_ranking_salud_top10(ranking_salud, ranking)
+    ranking_vida_top10 = build_ranking_vida_top10(ranking_vida)
 
     total_neta = float(ranking["FACTURACION_NETA"].sum()) if not ranking.empty else 0.0
     total_primas_netas = float(ranking["PRIMAS_NETAS"].sum()) if not ranking.empty else 0.0
@@ -1344,16 +1619,21 @@ def main() -> None:
     total_salud_bruta = float(ranking_salud["FACTURACION_SALUD_BRUTA"].sum()) if not ranking_salud.empty else 0.0
     total_salud_anulaciones = float(ranking_salud["FACTURACION_SALUD_ANULACIONES"].sum()) if not ranking_salud.empty else 0.0
     total_salud_neta = float(ranking_salud["FACTURACION_SALUD_NETA"].sum()) if not ranking_salud.empty else 0.0
+    total_vida_bruta = float(ranking_vida["FACTURACION_VIDA_BRUTA"].sum()) if not ranking_vida.empty else 0.0
+    total_vida_anulaciones = float(ranking_vida["FACTURACION_VIDA_ANULACIONES"].sum()) if not ranking_vida.empty else 0.0
+    total_vida_neta = float(ranking_vida["FACTURACION_VIDA_NETA"].sum()) if not ranking_vida.empty else 0.0
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("Facturacion neta Decesos", format_euro(total_neta))
     col2.metric("Siniestralidad Decesos", format_percent(siniestralidad_total))
     col3.metric("Facturacion neta Salud", format_euro(total_salud_neta))
+    col4.metric("Facturacion neta Vida", format_euro(total_vida_neta))
 
-    col4, col5, col6 = st.columns(3)
-    col4.metric("Facturacion Salud bruta", format_euro(total_salud_bruta))
-    col5.metric("Anulaciones Salud", format_euro(total_salud_anulaciones))
-    col6.metric("Siniestros Decesos", format_euro(total_siniestros))
+    col5, col6, col7, col8 = st.columns(4)
+    col5.metric("Facturacion Salud bruta", format_euro(total_salud_bruta))
+    col6.metric("Anulaciones Salud", format_euro(total_salud_anulaciones))
+    col7.metric("Facturacion Vida bruta", format_euro(total_vida_bruta))
+    col8.metric("Anulaciones Vida", format_euro(total_vida_anulaciones))
 
     st.sidebar.title("Rankings")
     vista = st.sidebar.radio(
@@ -1361,7 +1641,9 @@ def main() -> None:
         [
             "Ranking Decesos",
             "Ranking Salud",
+            "Ranking Vida",
             "Facturacion Salud",
+            "Facturacion Vida",
             "Ranking completo Decesos",
             "Detalles",
         ],
@@ -1385,6 +1667,15 @@ def main() -> None:
         else:
             st.dataframe(style_liga_salud(ranking_salud_top10), use_container_width=True, hide_index=True)
 
+    elif vista == "Ranking Vida":
+        st.markdown(f"<h2 style='color:{COLOR_VIDA};'>Ranking Vida</h2>", unsafe_allow_html=True)
+        st.caption("Top 10 por facturacion neta Vida. La facturacion bruta usa FECHALTA y PRIMATOTAL; las anulaciones salen de bajas con ASISA VIDA RIESGO.")
+
+        if ranking_vida_top10.empty:
+            st.info("No hay datos en Ranking Vida.")
+        else:
+            st.dataframe(style_ranking_vida(ranking_vida_top10), use_container_width=True, hide_index=True)
+
     elif vista == "Facturacion Salud":
         st.subheader("Facturacion Salud")
         if ranking_salud.empty:
@@ -1396,6 +1687,23 @@ def main() -> None:
                         "FACTURACION_SALUD_BRUTA": lambda value: format_euro(float(value)),
                         "FACTURACION_SALUD_ANULACIONES": lambda value: format_euro(float(value)),
                         "FACTURACION_SALUD_NETA": lambda value: format_euro(float(value)),
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    elif vista == "Facturacion Vida":
+        st.subheader("Facturacion Vida")
+        if ranking_vida.empty:
+            st.info("No hay datos de Vida para los filtros seleccionados.")
+        else:
+            st.dataframe(
+                ranking_vida.style.format(
+                    {
+                        "FACTURACION_VIDA_BRUTA": lambda value: format_euro(float(value)),
+                        "FACTURACION_VIDA_ANULACIONES": lambda value: format_euro(float(value)),
+                        "FACTURACION_VIDA_NETA": lambda value: format_euro(float(value)),
                     }
                 ),
                 use_container_width=True,
@@ -1459,11 +1767,19 @@ def main() -> None:
         with st.expander("Detalle Salud - anulaciones"):
             st.dataframe(salud_anulaciones_detail[salud_columns_for_display(salud_anulaciones_detail)].style.format({"PRIMA_NETA_SALUD_VALOR": lambda value: format_euro(float(value))}), use_container_width=True, hide_index=True)
 
+        with st.expander("Detalle Vida - facturacion bruta"):
+            st.dataframe(vida_bruta_detail[vida_columns_for_display(vida_bruta_detail)].style.format({"PRIMA_VIDA_VALOR": lambda value: format_euro(float(value))}), use_container_width=True, hide_index=True)
+
+        with st.expander("Detalle Vida - anulaciones"):
+            st.dataframe(vida_anulaciones_detail[vida_columns_for_display(vida_anulaciones_detail)].style.format({"PRIMA_VIDA_VALOR": lambda value: format_euro(float(value))}), use_container_width=True, hide_index=True)
+
     excel_bytes = dataframe_to_excel(
         ranking,
         ranking_salud,
+        ranking_vida,
         ranking_decesos_top10,
         ranking_salud_top10,
+        ranking_vida_top10,
         altas_detail,
         anulaciones_detail,
         siniestros_detail,
@@ -1471,15 +1787,17 @@ def main() -> None:
         primas_anuladas_detail,
         salud_bruta_detail,
         salud_anulaciones_detail,
+        vida_bruta_detail,
+        vida_anulaciones_detail,
         sheet_summary,
         ranking_date,
         excluded_products,
     )
 
     st.download_button(
-        "Descargar ranking neto con Salud en Excel",
+        "Descargar ranking neto con Salud y Vida en Excel",
         data=excel_bytes,
-        file_name=f"ranking_decesos_salud_{ranking_date:%Y%m%d}.xlsx",
+        file_name=f"ranking_decesos_salud_vida_{ranking_date:%Y%m%d}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 

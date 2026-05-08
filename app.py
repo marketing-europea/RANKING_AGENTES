@@ -40,11 +40,12 @@ REQUIRED_ANULACIONES_COLUMNS = (
     "CAUSA",
 )
 
-# Siniestros: fecha por FECHOCUR e importe solo por PAGOSPDT.
+# Siniestros: fecha por FECHOCUR e importe por RESERACT + PAGOSPDT.
 REQUIRED_SINIESTROS_COLUMNS = (
     "PRODUCTO",
     "CODIMEDI",
     "FECHOCUR",
+    "RESERACT",
     "PAGOSPDT",
 )
 
@@ -423,7 +424,7 @@ def prepare_siniestros_data(df: pd.DataFrame) -> pd.DataFrame:
     work["PRODUCTO_NORMALIZADO"] = work["PRODUCTO"].apply(normalize_product)
     work["AGENTE"] = work["CODIMEDI"].apply(normalize_agent)
 
-    # Nueva logica: fecha por fecha de ocurrencia.
+    # Fecha para imputar el siniestro: fecha de ocurrencia.
     work["FECHA_SINIESTRO"] = pd.to_datetime(
         work["FECHOCUR"],
         dayfirst=True,
@@ -432,10 +433,18 @@ def prepare_siniestros_data(df: pd.DataFrame) -> pd.DataFrame:
     work["ANIO_SINIESTRO"] = work["FECHA_SINIESTRO"].dt.year
     work["MES_SINIESTRO"] = work["FECHA_SINIESTRO"].dt.month
 
-    # Nueva logica: importe de siniestro = solo pagos realizados.
+    # Importe para siniestralidad: reserva actual + pagos pendientes.
+    # Ejemplo: 53,86 + 4.846,14 = 4.900,00
+    # Ejemplo: 400,00 + 3.600,00 = 4.000,00
+    work["RESERACT_VALOR"] = work["RESERACT"].apply(parse_spanish_number)
     work["PAGOSPDT_VALOR"] = work["PAGOSPDT"].apply(parse_spanish_number)
 
-    # Columnas auxiliares para comprobar en detalle, no se usan para calcular siniestralidad.
+    # Columnas auxiliares para comprobar en detalle, no se usan en el importe.
+    work["EXPECACT_VALOR"] = (
+        work["EXPECACT"].apply(parse_spanish_number)
+        if "EXPECACT" in work.columns
+        else 0.0
+    )
     work["PAGOSRZD_VALOR"] = (
         work["PAGOSRZD"].apply(parse_spanish_number)
         if "PAGOSRZD" in work.columns
@@ -447,7 +456,7 @@ def prepare_siniestros_data(df: pd.DataFrame) -> pd.DataFrame:
         else 0.0
     )
 
-    work["IMPORTE_SINIESTRO"] = work["PAGOSPDT_VALOR"]
+    work["IMPORTE_SINIESTRO"] = work["RESERACT_VALOR"] + work["PAGOSPDT_VALOR"]
 
     return work
 
@@ -1249,6 +1258,10 @@ def siniestros_columns_for_display(detail: pd.DataFrame) -> list[str]:
         "MOTIVO",
         "COBERTURA",
         "NATURALEZA",
+        "RESERACT",
+        "RESERACT_VALOR",
+        "EXPECACT",
+        "EXPECACT_VALOR",
         "PAGOSPDT",
         "PAGOSPDT_VALOR",
         "PAGOSRZD",
@@ -1362,7 +1375,7 @@ def dataframe_to_excel(
             {"CAMPO": "PRODUCTOS_EXCLUIDOS", "VALOR": ", ".join(excluded_products)},
             {"CAMPO": "REGLA_ANULACIONES_DECESOS", "VALOR": "FECHA EMISION del 1 al 25 de enero se imputa al año anterior"},
             {"CAMPO": "SINIESTROS_FECHA", "VALOR": "FECHOCUR"},
-            {"CAMPO": "SINIESTROS_IMPORTE", "VALOR": "Solo PAGOSPDT"},
+            {"CAMPO": "SINIESTROS_IMPORTE", "VALOR": "RESERACT + PAGOSPDT"},
             {"CAMPO": "DECESOS_LIGA_PRO", "VALOR": "Facturacion neta >= 30.000 y siniestralidad < 25%"},
             {"CAMPO": "DECESOS_LIGA_ELITE", "VALOR": "Facturacion neta >= 60.000 y siniestralidad < 25%"},
             {"CAMPO": "SALUD_LIGA_PRO", "VALOR": "Facturacion Salud >= 25.000 y Facturacion Decesos >= 12.000"},
@@ -1780,7 +1793,7 @@ def main() -> None:
             )
 
         with st.expander("Detalle de siniestros Decesos incluidos"):
-            st.caption("El importe usado para siniestralidad es PAGOSPDT_VALOR. La fecha usada para año/mes es FECHOCUR.")
+            st.caption("El importe usado para siniestralidad es RESERACT_VALOR + PAGOSPDT_VALOR. La fecha usada para año/mes es FECHOCUR.")
             st.dataframe(
                 siniestros_detail[siniestros_columns_for_display(siniestros_detail)].style.format(
                     {

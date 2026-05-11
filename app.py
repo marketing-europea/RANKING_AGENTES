@@ -40,7 +40,6 @@ REQUIRED_ANULACIONES_COLUMNS = (
     "CAUSA",
 )
 
-# Siniestros: fecha por FECHOCUR e importe por RESERACT + PAGOSPDT.
 REQUIRED_SINIESTROS_COLUMNS = (
     "PRODUCTO",
     "CODIMEDI",
@@ -178,6 +177,10 @@ def first_non_empty(values: pd.Series) -> str:
             return str(value).strip()
 
     return ""
+
+
+def in_date_range(series: pd.Series, fecha_desde: date, fecha_hasta: date) -> pd.Series:
+    return series.notna() & series.dt.date.ge(fecha_desde) & series.dt.date.le(fecha_hasta)
 
 
 def read_excel_all_sheets(uploaded_file) -> pd.DataFrame:
@@ -323,20 +326,6 @@ def prepare_decesos_data(
     )
     work["ANIO_MOVIMIENTO"] = work["FECHA_MOVIMIENTO"].dt.year
     work["MES_MOVIMIENTO"] = work["FECHA_MOVIMIENTO"].dt.month
-
-    if movement == "ANULACION":
-        # Regla de imputacion Decesos:
-        # las bajas con FECHA EMISION entre el 1 y el 25 de enero
-        # se imputan al ejercicio anterior.
-        enero_hasta_25 = (
-            work["FECHA_MOVIMIENTO"].notna()
-            & work["FECHA_MOVIMIENTO"].dt.month.eq(1)
-            & work["FECHA_MOVIMIENTO"].dt.day.lt(25)
-        )
-        work.loc[enero_hasta_25, "ANIO_MOVIMIENTO"] = (
-            work.loc[enero_hasta_25, "ANIO_MOVIMIENTO"] - 1
-        )
-
     work["PRIMA_NETA_VALOR"] = work["PRIMA NETA"].apply(parse_spanish_number)
 
     return work
@@ -344,7 +333,8 @@ def prepare_decesos_data(
 
 def filter_movements(
     df: pd.DataFrame,
-    ranking_date: date,
+    fecha_desde: date,
+    fecha_hasta: date,
     excluded_products: list[str],
     date_column: str,
     movement: str,
@@ -353,9 +343,7 @@ def filter_movements(
     excluded = {normalize_product(product) for product in excluded_products}
 
     mask = (
-        work["FECHA_MOVIMIENTO"].notna()
-        & work["ANIO_MOVIMIENTO"].eq(ranking_date.year)
-        & work["MES_MOVIMIENTO"].le(ranking_date.month)
+        in_date_range(work["FECHA_MOVIMIENTO"], fecha_desde, fecha_hasta)
         & ~work["PRODUCTO_NORMALIZADO"].isin(excluded)
     )
 
@@ -424,7 +412,6 @@ def prepare_siniestros_data(df: pd.DataFrame) -> pd.DataFrame:
     work["PRODUCTO_NORMALIZADO"] = work["PRODUCTO"].apply(normalize_product)
     work["AGENTE"] = work["CODIMEDI"].apply(normalize_agent)
 
-    # Fecha para imputar el siniestro: fecha de ocurrencia.
     work["FECHA_SINIESTRO"] = pd.to_datetime(
         work["FECHOCUR"],
         dayfirst=True,
@@ -433,13 +420,9 @@ def prepare_siniestros_data(df: pd.DataFrame) -> pd.DataFrame:
     work["ANIO_SINIESTRO"] = work["FECHA_SINIESTRO"].dt.year
     work["MES_SINIESTRO"] = work["FECHA_SINIESTRO"].dt.month
 
-    # Importe para siniestralidad: reserva actual + pagos pendientes.
-    # Ejemplo: 53,86 + 4.846,14 = 4.900,00
-    # Ejemplo: 400,00 + 3.600,00 = 4.000,00
     work["RESERACT_VALOR"] = work["RESERACT"].apply(parse_spanish_number)
     work["PAGOSPDT_VALOR"] = work["PAGOSPDT"].apply(parse_spanish_number)
 
-    # Columnas auxiliares para comprobar en detalle, no se usan en el importe.
     work["EXPECACT_VALOR"] = (
         work["EXPECACT"].apply(parse_spanish_number)
         if "EXPECACT" in work.columns
@@ -463,16 +446,15 @@ def prepare_siniestros_data(df: pd.DataFrame) -> pd.DataFrame:
 
 def filter_siniestros(
     df: pd.DataFrame,
-    ranking_date: date,
+    fecha_desde: date,
+    fecha_hasta: date,
     excluded_products: list[str],
 ) -> pd.DataFrame:
     work = prepare_siniestros_data(df)
     excluded = {normalize_product(product) for product in excluded_products}
 
     mask = (
-        work["FECHA_SINIESTRO"].notna()
-        & work["ANIO_SINIESTRO"].eq(ranking_date.year)
-        & work["MES_SINIESTRO"].le(ranking_date.month)
+        in_date_range(work["FECHA_SINIESTRO"], fecha_desde, fecha_hasta)
         & ~work["PRODUCTO_NORMALIZADO"].isin(excluded)
     )
 
@@ -530,12 +512,14 @@ def calculate_ranking(
     siniestros_df: pd.DataFrame,
     primas_emitidas_df: pd.DataFrame,
     primas_anuladas_df: pd.DataFrame,
-    ranking_date: date,
+    fecha_desde: date,
+    fecha_hasta: date,
     excluded_products: list[str],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     altas_detail = filter_movements(
         facturacion_df,
-        ranking_date,
+        fecha_desde,
+        fecha_hasta,
         excluded_products,
         "POLIALTA",
         "ALTA",
@@ -543,7 +527,8 @@ def calculate_ranking(
 
     anulaciones_detail = filter_movements(
         anulaciones_df,
-        ranking_date,
+        fecha_desde,
+        fecha_hasta,
         excluded_products,
         "FECHA EMISION",
         "ANULACION",
@@ -551,7 +536,8 @@ def calculate_ranking(
 
     siniestros_detail = filter_siniestros(
         siniestros_df,
-        ranking_date,
+        fecha_desde,
+        fecha_hasta,
         excluded_products,
     )
 
@@ -760,23 +746,18 @@ def prepare_bajas_salud_data(df: pd.DataFrame) -> pd.DataFrame:
 def calculate_facturacion_salud(
     facturacion_salud_df: pd.DataFrame,
     bajas_salud_df: pd.DataFrame,
-    ranking_date: date,
+    fecha_desde: date,
+    fecha_hasta: date,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     facturacion_detail = prepare_facturacion_salud_data(facturacion_salud_df)
     bajas_detail = prepare_bajas_salud_data(bajas_salud_df)
 
-    bruta_mask = (
-        facturacion_detail["FECHA_EFECTO_SALUD"].notna()
-        & facturacion_detail["ANIO_SALUD"].eq(ranking_date.year)
-        & facturacion_detail["MES_SALUD"].le(ranking_date.month)
-    )
+    bruta_mask = in_date_range(facturacion_detail["FECHA_EFECTO_SALUD"], fecha_desde, fecha_hasta)
 
     salud_bruta_detail = facturacion_detail[bruta_mask].copy()
 
     bajas_mask = (
-        bajas_detail["FECHA_BAJA_SALUD"].notna()
-        & bajas_detail["ANIO_BAJA_SALUD"].eq(ranking_date.year)
-        & bajas_detail["MES_BAJA_SALUD"].le(ranking_date.month)
+        in_date_range(bajas_detail["FECHA_BAJA_SALUD"], fecha_desde, fecha_hasta)
         & bajas_detail["FECHA_REACTIVACION_SALUD"].isna()
         & ~bajas_detail["DES_PRODUCTO_NORMALIZADO"].eq("ASISA VIDA RIESGO")
     )
@@ -887,23 +868,18 @@ def prepare_facturacion_vida_data(df: pd.DataFrame) -> pd.DataFrame:
 def calculate_facturacion_vida(
     facturacion_vida_df: pd.DataFrame,
     bajas_salud_df: pd.DataFrame,
-    ranking_date: date,
+    fecha_desde: date,
+    fecha_hasta: date,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     facturacion_detail = prepare_facturacion_vida_data(facturacion_vida_df)
     bajas_detail = prepare_bajas_salud_data(bajas_salud_df)
 
-    bruta_mask = (
-        facturacion_detail["FECHA_ALTA_VIDA"].notna()
-        & facturacion_detail["ANIO_VIDA"].eq(ranking_date.year)
-        & facturacion_detail["MES_VIDA"].le(ranking_date.month)
-    )
+    bruta_mask = in_date_range(facturacion_detail["FECHA_ALTA_VIDA"], fecha_desde, fecha_hasta)
 
     vida_bruta_detail = facturacion_detail[bruta_mask].copy()
 
     bajas_mask = (
-        bajas_detail["FECHA_BAJA_SALUD"].notna()
-        & bajas_detail["ANIO_BAJA_SALUD"].eq(ranking_date.year)
-        & bajas_detail["MES_BAJA_SALUD"].le(ranking_date.month)
+        in_date_range(bajas_detail["FECHA_BAJA_SALUD"], fecha_desde, fecha_hasta)
         & bajas_detail["FECHA_REACTIVACION_SALUD"].isna()
         & bajas_detail["DES_PRODUCTO_NORMALIZADO"].eq("ASISA VIDA RIESGO")
     )
@@ -1235,6 +1211,7 @@ def detail_columns_for_display(detail: pd.DataFrame) -> list[str]:
         "DEPENDENCIA",
         "PRIMA NETA",
         "PRIMA_NETA_VALOR",
+        "FECHA_MOVIMIENTO",
         "ANIO_MOVIMIENTO",
         "MES_MOVIMIENTO",
     ]
@@ -1362,18 +1339,18 @@ def dataframe_to_excel(
     vida_bruta_detail: pd.DataFrame,
     vida_anulaciones_detail: pd.DataFrame,
     sheet_summary: pd.DataFrame,
-    ranking_date: date,
+    fecha_desde: date,
+    fecha_hasta: date,
     excluded_products: list[str],
 ) -> bytes:
     output = BytesIO()
 
     parametros = pd.DataFrame(
         [
-            {"CAMPO": "FECHA_RANKING", "VALOR": ranking_date.strftime("%d/%m/%Y")},
-            {"CAMPO": "ANIO", "VALOR": ranking_date.year},
-            {"CAMPO": "MES_HASTA", "VALOR": ranking_date.month},
+            {"CAMPO": "FECHA_DESDE", "VALOR": fecha_desde.strftime("%d/%m/%Y")},
+            {"CAMPO": "FECHA_HASTA", "VALOR": fecha_hasta.strftime("%d/%m/%Y")},
             {"CAMPO": "PRODUCTOS_EXCLUIDOS", "VALOR": ", ".join(excluded_products)},
-            {"CAMPO": "REGLA_ANULACIONES_DECESOS", "VALOR": "FECHA EMISION del 1 al 25 de enero se imputa al año anterior"},
+            {"CAMPO": "PERIODO", "VALOR": "Se filtran movimientos entre FECHA_DESDE y FECHA_HASTA, ambas incluidas"},
             {"CAMPO": "SINIESTROS_FECHA", "VALOR": "FECHOCUR"},
             {"CAMPO": "SINIESTROS_IMPORTE", "VALOR": "RESERACT + PAGOSPDT"},
             {"CAMPO": "DECESOS_LIGA_PRO", "VALOR": "Facturacion neta >= 30.000 y siniestralidad < 25%"},
@@ -1419,10 +1396,28 @@ def main() -> None:
 
     st.title("Ranking agentes - DECESOS + SALUD + VIDA")
 
-    ranking_date = st.date_input(
-        "Para que fecha quieres calcular el ranking?",
-        value=DEFAULT_RANKING_DATE,
-        format="DD/MM/YYYY",
+    col_fecha_1, col_fecha_2 = st.columns(2)
+
+    with col_fecha_1:
+        fecha_desde = st.date_input(
+            "Fecha desde",
+            value=date(DEFAULT_RANKING_DATE.year, DEFAULT_RANKING_DATE.month, 1),
+            format="DD/MM/YYYY",
+        )
+
+    with col_fecha_2:
+        fecha_hasta = st.date_input(
+            "Fecha hasta",
+            value=DEFAULT_RANKING_DATE,
+            format="DD/MM/YYYY",
+        )
+
+    if fecha_desde > fecha_hasta:
+        st.error("La fecha desde no puede ser posterior a la fecha hasta.")
+        st.stop()
+
+    st.caption(
+        f"Periodo seleccionado: {fecha_desde.strftime('%d/%m/%Y')} - {fecha_hasta.strftime('%d/%m/%Y')}"
     )
 
     st.header("Archivos Decesos")
@@ -1625,7 +1620,8 @@ def main() -> None:
         raw_siniestros_df,
         raw_primas_emitidas_df,
         raw_primas_anuladas_df,
-        ranking_date,
+        fecha_desde,
+        fecha_hasta,
         excluded_products,
     )
 
@@ -1634,14 +1630,16 @@ def main() -> None:
     ranking_salud, salud_bruta_detail, salud_anulaciones_detail = calculate_facturacion_salud(
         raw_facturacion_salud_df,
         raw_bajas_salud_df,
-        ranking_date,
+        fecha_desde,
+        fecha_hasta,
     )
     ranking_salud = add_mapeo_to_simple_ranking(ranking_salud, mapeo)
 
     ranking_vida, vida_bruta_detail, vida_anulaciones_detail = calculate_facturacion_vida(
         raw_facturacion_vida_df,
         raw_bajas_salud_df,
-        ranking_date,
+        fecha_desde,
+        fecha_hasta,
     )
     ranking_vida = add_mapeo_to_simple_ranking(ranking_vida, mapeo)
 
@@ -1793,7 +1791,7 @@ def main() -> None:
             )
 
         with st.expander("Detalle de siniestros Decesos incluidos"):
-            st.caption("El importe usado para siniestralidad es RESERACT_VALOR + PAGOSPDT_VALOR. La fecha usada para año/mes es FECHOCUR.")
+            st.caption("El importe usado para siniestralidad es RESERACT_VALOR + PAGOSPDT_VALOR. La fecha usada es FECHOCUR.")
             st.dataframe(
                 siniestros_detail[siniestros_columns_for_display(siniestros_detail)].style.format(
                     {
@@ -1878,14 +1876,15 @@ def main() -> None:
         vida_bruta_detail,
         vida_anulaciones_detail,
         sheet_summary,
-        ranking_date,
+        fecha_desde,
+        fecha_hasta,
         excluded_products,
     )
 
     st.download_button(
         "Descargar ranking neto con Salud y Vida en Excel",
         data=excel_bytes,
-        file_name=f"ranking_decesos_salud_vida_{ranking_date:%Y%m%d}.xlsx",
+        file_name=f"ranking_decesos_salud_vida_{fecha_desde:%Y%m%d}_{fecha_hasta:%Y%m%d}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 

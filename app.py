@@ -1564,7 +1564,6 @@ def main() -> None:
         excluded_products = cache["excluded_products"]
 
     else:
-
         try:
             raw_facturacion_df = read_excel_all_sheets(uploaded_facturacion)
             raw_anulaciones_df = read_excel_all_sheets(uploaded_anulaciones)
@@ -1579,165 +1578,159 @@ def main() -> None:
             st.error(f"No he podido leer los archivos: {error}")
             st.stop()
 
-    if (
-        raw_facturacion_df.empty
-        or raw_anulaciones_df.empty
-        or raw_siniestros_df.empty
-        or raw_primas_emitidas_df.empty
-        or raw_primas_anuladas_df.empty
-        or raw_facturacion_salud_df.empty
-        or raw_bajas_salud_df.empty
-        or raw_facturacion_vida_df.empty
-        or raw_mapeo_df.empty
-    ):
-        st.warning("Alguno de los archivos esta vacio.")
-        st.stop()
+        if (
+            raw_facturacion_df.empty
+            or raw_anulaciones_df.empty
+            or raw_siniestros_df.empty
+            or raw_primas_emitidas_df.empty
+            or raw_primas_anuladas_df.empty
+            or raw_facturacion_salud_df.empty
+            or raw_bajas_salud_df.empty
+            or raw_facturacion_vida_df.empty
+            or raw_mapeo_df.empty
+        ):
+            st.warning("Alguno de los archivos esta vacio.")
+            st.stop()
 
-    missing_facturacion = validate_columns(raw_facturacion_df, REQUIRED_FACTURACION_COLUMNS)
-    missing_anulaciones = validate_columns(raw_anulaciones_df, REQUIRED_ANULACIONES_COLUMNS)
-    missing_siniestros = validate_columns(raw_siniestros_df, REQUIRED_SINIESTROS_COLUMNS)
-    missing_primas_emitidas = validate_columns(raw_primas_emitidas_df, REQUIRED_PRIMAS_COLUMNS)
-    missing_primas_anuladas = validate_columns(raw_primas_anuladas_df, REQUIRED_PRIMAS_COLUMNS)
-    missing_facturacion_salud = validate_columns(raw_facturacion_salud_df, REQUIRED_FACTURACION_SALUD_COLUMNS)
-    missing_bajas_salud = validate_columns(raw_bajas_salud_df, REQUIRED_BAJAS_SALUD_COLUMNS)
-    missing_facturacion_vida = validate_columns(raw_facturacion_vida_df, REQUIRED_FACTURACION_VIDA_COLUMNS)
-    missing_mapeo = validate_columns(raw_mapeo_df, REQUIRED_MAPEO_COLUMNS)
+        missing_facturacion = validate_columns(raw_facturacion_df, REQUIRED_FACTURACION_COLUMNS)
+        missing_anulaciones = validate_columns(raw_anulaciones_df, REQUIRED_ANULACIONES_COLUMNS)
+        missing_siniestros = validate_columns(raw_siniestros_df, REQUIRED_SINIESTROS_COLUMNS)
+        missing_primas_emitidas = validate_columns(raw_primas_emitidas_df, REQUIRED_PRIMAS_COLUMNS)
+        missing_primas_anuladas = validate_columns(raw_primas_anuladas_df, REQUIRED_PRIMAS_COLUMNS)
+        missing_facturacion_salud = validate_columns(raw_facturacion_salud_df, REQUIRED_FACTURACION_SALUD_COLUMNS)
+        missing_bajas_salud = validate_columns(raw_bajas_salud_df, REQUIRED_BAJAS_SALUD_COLUMNS)
+        missing_facturacion_vida = validate_columns(raw_facturacion_vida_df, REQUIRED_FACTURACION_VIDA_COLUMNS)
+        missing_mapeo = validate_columns(raw_mapeo_df, REQUIRED_MAPEO_COLUMNS)
 
-    if (
-        missing_facturacion
-        or missing_anulaciones
-        or missing_siniestros
-        or missing_primas_emitidas
-        or missing_primas_anuladas
-        or missing_facturacion_salud
-        or missing_bajas_salud
-        or missing_facturacion_vida
-        or missing_mapeo
-    ):
-        messages = []
-        if missing_facturacion:
-            messages.append(f"Facturacion Decesos: {', '.join(missing_facturacion)}")
-        if missing_anulaciones:
-            messages.append(f"Anulaciones Decesos: {', '.join(missing_anulaciones)}")
-        if missing_siniestros:
-            messages.append(f"Siniestros Decesos: {', '.join(missing_siniestros)}")
-        if missing_primas_emitidas:
-            messages.append(f"Primas emitidas: {', '.join(missing_primas_emitidas)}")
-        if missing_primas_anuladas:
-            messages.append(f"Primas anuladas: {', '.join(missing_primas_anuladas)}")
-        if missing_facturacion_salud:
-            messages.append(f"Facturacion Salud: {', '.join(missing_facturacion_salud)}")
-        if missing_bajas_salud:
-            messages.append(f"Bajas Salud: {', '.join(missing_bajas_salud)}")
-        if missing_facturacion_vida:
-            messages.append(f"Facturacion Vida: {', '.join(missing_facturacion_vida)}")
-        if missing_mapeo:
-            messages.append(f"Mapeo mediadores: {', '.join(missing_mapeo)}")
+        if (
+            missing_facturacion
+            or missing_anulaciones
+            or missing_siniestros
+            or missing_primas_emitidas
+            or missing_primas_anuladas
+            or missing_facturacion_salud
+            or missing_bajas_salud
+            or missing_facturacion_vida
+            or missing_mapeo
+        ):
+            messages = []
+            if missing_facturacion:
+                messages.append(f"Facturacion Decesos: {', '.join(missing_facturacion)}")
+            if missing_anulaciones:
+                messages.append(f"Anulaciones Decesos: {', '.join(missing_anulaciones)}")
+            if missing_siniestros:
+                messages.append(f"Siniestros Decesos: {', '.join(missing_siniestros)}")
+            if missing_primas_emitidas:
+                messages.append(f"Primas emitidas: {', '.join(missing_primas_emitidas)}")
+            if missing_primas_anuladas:
+                messages.append(f"Primas anuladas: {', '.join(missing_primas_anuladas)}")
+            if missing_facturacion_salud:
+                messages.append(f"Facturacion Salud: {', '.join(missing_facturacion_salud)}")
+            if missing_bajas_salud:
+                messages.append(f"Bajas Salud: {', '.join(missing_bajas_salud)}")
+            if missing_facturacion_vida:
+                messages.append(f"Facturacion Vida: {', '.join(missing_facturacion_vida)}")
+            if missing_mapeo:
+                messages.append(f"Mapeo mediadores: {', '.join(missing_mapeo)}")
 
-        st.error("Faltan columnas obligatorias. " + " | ".join(messages))
-        st.stop()
+            st.error("Faltan columnas obligatorias. " + " | ".join(messages))
+            st.stop()
 
-    mapeo = prepare_mapeo_data(raw_mapeo_df)
+        mapeo = prepare_mapeo_data(raw_mapeo_df)
 
-    sheet_summary = pd.concat(
-        [
-            build_sheet_summary(raw_facturacion_df, "FACTURACION_DECESOS"),
-            build_sheet_summary(raw_anulaciones_df, "FACTURACION_ANULACIONES_DECESOS"),
-            build_sheet_summary(raw_siniestros_df, "SINIESTROS_DECESOS"),
-            build_sheet_summary(raw_primas_emitidas_df, "PRIMAS_EMITIDAS"),
-            build_sheet_summary(raw_primas_anuladas_df, "PRIMAS_ANULADAS"),
-            build_sheet_summary(raw_facturacion_salud_df, "FACTURACION_SALUD"),
-            build_sheet_summary(raw_bajas_salud_df, "BAJAS_SALUD"),
-            build_sheet_summary(raw_facturacion_vida_df, "FACTURACION_VIDA"),
-            build_sheet_summary(raw_mapeo_df, "MAPEO_MEDIADORES"),
-        ],
-        ignore_index=True,
-    )
-
-    with st.expander("Comprobacion de hojas leidas", expanded=True):
-        st.dataframe(sheet_summary, use_container_width=True, hide_index=True)
-
-    product_options = sorted(
-        pd.concat(
-            [raw_facturacion_df["PRODUCTO"], raw_anulaciones_df["PRODUCTO"], raw_siniestros_df["PRODUCTO"]],
+        sheet_summary = pd.concat(
+            [
+                build_sheet_summary(raw_facturacion_df, "FACTURACION_DECESOS"),
+                build_sheet_summary(raw_anulaciones_df, "FACTURACION_ANULACIONES_DECESOS"),
+                build_sheet_summary(raw_siniestros_df, "SINIESTROS_DECESOS"),
+                build_sheet_summary(raw_primas_emitidas_df, "PRIMAS_EMITIDAS"),
+                build_sheet_summary(raw_primas_anuladas_df, "PRIMAS_ANULADAS"),
+                build_sheet_summary(raw_facturacion_salud_df, "FACTURACION_SALUD"),
+                build_sheet_summary(raw_bajas_salud_df, "BAJAS_SALUD"),
+                build_sheet_summary(raw_facturacion_vida_df, "FACTURACION_VIDA"),
+                build_sheet_summary(raw_mapeo_df, "MAPEO_MEDIADORES"),
+            ],
             ignore_index=True,
         )
-        .dropna()
-        .map(normalize_product)
-        .unique()
-        .tolist()
-    )
 
-    default_excluded = [product for product in DEFAULT_EXCLUDED_PRODUCTS if product in product_options]
+        with st.expander("Comprobacion de hojas leidas", expanded=True):
+            st.dataframe(sheet_summary, use_container_width=True, hide_index=True)
 
-    excluded_products = st.multiselect(
-        "Productos excluidos Decesos",
-        product_options,
-        default=default_excluded,
-    )
+        product_options = sorted(
+            pd.concat(
+                [raw_facturacion_df["PRODUCTO"], raw_anulaciones_df["PRODUCTO"], raw_siniestros_df["PRODUCTO"]],
+                ignore_index=True,
+            )
+            .dropna()
+            .map(normalize_product)
+            .unique()
+            .tolist()
+        )
 
-    (
-        ranking,
-        altas_detail,
-        anulaciones_detail,
-        siniestros_detail,
-        primas_emitidas_detail,
-        primas_anuladas_detail,
-    ) = calculate_ranking(
-        raw_facturacion_df,
-        raw_anulaciones_df,
-        raw_siniestros_df,
-        raw_primas_emitidas_df,
-        raw_primas_anuladas_df,
-        fecha_desde,
-        fecha_hasta,
-        excluded_products,
-    )
+        default_excluded = [product for product in DEFAULT_EXCLUDED_PRODUCTS if product in product_options]
 
-    ranking = add_mapeo_to_ranking(ranking, mapeo)
+        excluded_products = st.multiselect(
+            "Productos excluidos Decesos",
+            product_options,
+            default=default_excluded,
+        )
 
-    ranking_salud, salud_bruta_detail, salud_anulaciones_detail = calculate_facturacion_salud(
-        raw_facturacion_salud_df,
-        raw_bajas_salud_df,
-        fecha_desde,
-        fecha_hasta,
-    )
-    ranking_salud = add_mapeo_to_simple_ranking(ranking_salud, mapeo)
+        (
+            ranking,
+            altas_detail,
+            anulaciones_detail,
+            siniestros_detail,
+            primas_emitidas_detail,
+            primas_anuladas_detail,
+        ) = calculate_ranking(
+            raw_facturacion_df,
+            raw_anulaciones_df,
+            raw_siniestros_df,
+            raw_primas_emitidas_df,
+            raw_primas_anuladas_df,
+            fecha_desde,
+            fecha_hasta,
+            excluded_products,
+        )
 
-    ranking_vida, vida_bruta_detail, vida_anulaciones_detail = calculate_facturacion_vida(
-        raw_facturacion_vida_df,
-        raw_bajas_salud_df,
-        fecha_desde,
-        fecha_hasta,
-    )
-    ranking_vida = add_mapeo_to_simple_ranking(ranking_vida, mapeo)
+        ranking = add_mapeo_to_ranking(ranking, mapeo)
 
-    # =========================
-    # CONVERTIR COLUMNAS DE POLIZAS A ENTERO
-    # =========================
-    columnas_enteras = [
-        "POLIZAS_ALTAS",
-        "POLIZAS_ANULADAS",
-        "POLIZAS_NETAS",
-        "POLIZAS_SALUD_BRUTAS",
-        "POLIZAS_SALUD_ANULADAS",
-        "POLIZAS_SALUD_NETAS",
-        "POLIZAS_VIDA_BRUTAS",
-        "POLIZAS_VIDA_ANULADAS",
-        "POLIZAS_VIDA_NETAS",
-        "NUM_SINIESTROS",
-    ]
+        ranking_salud, salud_bruta_detail, salud_anulaciones_detail = calculate_facturacion_salud(
+            raw_facturacion_salud_df,
+            raw_bajas_salud_df,
+            fecha_desde,
+            fecha_hasta,
+        )
+        ranking_salud = add_mapeo_to_simple_ranking(ranking_salud, mapeo)
 
-    for dataframe in [ranking, ranking_salud, ranking_vida]:
-        for columna in columnas_enteras:
-            if columna in dataframe.columns:
-                dataframe[columna] = dataframe[columna].fillna(0).round(0).astype(int)
+        ranking_vida, vida_bruta_detail, vida_anulaciones_detail = calculate_facturacion_vida(
+            raw_facturacion_vida_df,
+            raw_bajas_salud_df,
+            fecha_desde,
+            fecha_hasta,
+        )
+        ranking_vida = add_mapeo_to_simple_ranking(ranking_vida, mapeo)
 
-    # =========================
-    # TOPS
-    # =========================
-    ranking_decesos_top10 = build_ranking_decesos_top10(ranking)
-    ranking_salud_top10 = build_ranking_salud_top10(ranking_salud, ranking)
+        columnas_enteras = [
+            "POLIZAS_ALTAS",
+            "POLIZAS_ANULADAS",
+            "POLIZAS_NETAS",
+            "POLIZAS_SALUD_BRUTAS",
+            "POLIZAS_SALUD_ANULADAS",
+            "POLIZAS_SALUD_NETAS",
+            "POLIZAS_VIDA_BRUTAS",
+            "POLIZAS_VIDA_ANULADAS",
+            "POLIZAS_VIDA_NETAS",
+            "NUM_SINIESTROS",
+        ]
+
+        for dataframe in [ranking, ranking_salud, ranking_vida]:
+            for columna in columnas_enteras:
+                if columna in dataframe.columns:
+                    dataframe[columna] = dataframe[columna].fillna(0).round(0).astype(int)
+
+        ranking_decesos_top10 = build_ranking_decesos_top10(ranking)
+        ranking_salud_top10 = build_ranking_salud_top10(ranking_salud, ranking)
         ranking_vida_top10 = build_ranking_vida_top10(ranking_vida)
 
         save_results_cache(

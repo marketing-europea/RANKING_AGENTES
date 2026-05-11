@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from datetime import date
 from io import BytesIO
+import pickle
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -22,6 +24,7 @@ SALUD_LIGA_ELITE_DECESOS_MINIMA = 4000.0
 COLOR_DECESOS = "#f32735"
 COLOR_SALUD = "#5271ff"
 COLOR_VIDA = "#ffb4ab"
+CACHE_FILE = Path("ranking_cache.pkl")
 
 REQUIRED_FACTURACION_COLUMNS = (
     "PRODUCTO",
@@ -1388,6 +1391,28 @@ def dataframe_to_excel(
 
 
 # =========================
+# CACHE RESULTADOS
+# =========================
+
+def save_results_cache(data: dict) -> None:
+    with open(CACHE_FILE, "wb") as file:
+        pickle.dump(data, file)
+
+
+def load_results_cache() -> dict | None:
+    if not CACHE_FILE.exists():
+        return None
+
+    with open(CACHE_FILE, "rb") as file:
+        return pickle.load(file)
+
+
+def delete_results_cache() -> None:
+    if CACHE_FILE.exists():
+        CACHE_FILE.unlink()
+
+
+# =========================
 # APP
 # =========================
 
@@ -1395,6 +1420,18 @@ def main() -> None:
     st.set_page_config(page_title="Ranking agentes", layout="wide")
 
     st.title("Ranking agentes - DECESOS + SALUD + VIDA")
+
+    col_cache_1, col_cache_2 = st.columns(2)
+
+    with col_cache_1:
+        usar_ultimo_calculo = st.button("Cargar último cálculo guardado")
+
+    with col_cache_2:
+        borrar_cache = st.button("Borrar archivos/resultados guardados")
+
+    if borrar_cache:
+        delete_results_cache()
+        st.success("Resultados guardados borrados. Ya puedes subir nuevos archivos para empezar de cero.")
 
     col_fecha_1, col_fecha_2 = st.columns(2)
 
@@ -1482,7 +1519,7 @@ def main() -> None:
             key="mapeo_mediadores",
         )
 
-    if (
+    faltan_archivos = (
         uploaded_facturacion is None
         or uploaded_anulaciones is None
         or uploaded_siniestros is None
@@ -1492,23 +1529,55 @@ def main() -> None:
         or uploaded_bajas_salud is None
         or uploaded_facturacion_vida is None
         or uploaded_mapeo is None
-    ):
-        st.info("Sube todos los archivos para calcular Decesos, Salud, Vida, mapeo y rankings.")
-        st.stop()
+    )
 
-    try:
-        raw_facturacion_df = read_excel_all_sheets(uploaded_facturacion)
-        raw_anulaciones_df = read_excel_all_sheets(uploaded_anulaciones)
-        raw_siniestros_df = read_excel_all_sheets(uploaded_siniestros)
-        raw_primas_emitidas_df = read_excel_many_files(uploaded_primas_emitidas)
-        raw_primas_anuladas_df = read_excel_many_files(uploaded_primas_anuladas)
-        raw_facturacion_salud_df = read_excel_all_sheets(uploaded_facturacion_salud)
-        raw_bajas_salud_df = read_excel_all_sheets(uploaded_bajas_salud)
-        raw_facturacion_vida_df = read_excel_all_sheets(uploaded_facturacion_vida)
-        raw_mapeo_df = read_excel_all_sheets(uploaded_mapeo)
-    except Exception as error:
-        st.error(f"No he podido leer los archivos: {error}")
-        st.stop()
+    if usar_ultimo_calculo or faltan_archivos:
+        cache = load_results_cache()
+
+        if cache is None:
+            if usar_ultimo_calculo:
+                st.warning("No hay ningún cálculo guardado todavía.")
+            else:
+                st.info("Sube todos los archivos para calcular Decesos, Salud, Vida, mapeo y rankings.")
+            st.stop()
+
+        st.warning("Mostrando último cálculo guardado. Para recalcular, sube todos los archivos de nuevo.")
+
+        ranking = cache["ranking"]
+        ranking_salud = cache["ranking_salud"]
+        ranking_vida = cache["ranking_vida"]
+        ranking_decesos_top10 = cache["ranking_decesos_top10"]
+        ranking_salud_top10 = cache["ranking_salud_top10"]
+        ranking_vida_top10 = cache["ranking_vida_top10"]
+        altas_detail = cache["altas_detail"]
+        anulaciones_detail = cache["anulaciones_detail"]
+        siniestros_detail = cache["siniestros_detail"]
+        primas_emitidas_detail = cache["primas_emitidas_detail"]
+        primas_anuladas_detail = cache["primas_anuladas_detail"]
+        salud_bruta_detail = cache["salud_bruta_detail"]
+        salud_anulaciones_detail = cache["salud_anulaciones_detail"]
+        vida_bruta_detail = cache["vida_bruta_detail"]
+        vida_anulaciones_detail = cache["vida_anulaciones_detail"]
+        sheet_summary = cache["sheet_summary"]
+        fecha_desde = cache["fecha_desde"]
+        fecha_hasta = cache["fecha_hasta"]
+        excluded_products = cache["excluded_products"]
+
+    else:
+
+        try:
+            raw_facturacion_df = read_excel_all_sheets(uploaded_facturacion)
+            raw_anulaciones_df = read_excel_all_sheets(uploaded_anulaciones)
+            raw_siniestros_df = read_excel_all_sheets(uploaded_siniestros)
+            raw_primas_emitidas_df = read_excel_many_files(uploaded_primas_emitidas)
+            raw_primas_anuladas_df = read_excel_many_files(uploaded_primas_anuladas)
+            raw_facturacion_salud_df = read_excel_all_sheets(uploaded_facturacion_salud)
+            raw_bajas_salud_df = read_excel_all_sheets(uploaded_bajas_salud)
+            raw_facturacion_vida_df = read_excel_all_sheets(uploaded_facturacion_vida)
+            raw_mapeo_df = read_excel_all_sheets(uploaded_mapeo)
+        except Exception as error:
+            st.error(f"No he podido leer los archivos: {error}")
+            st.stop()
 
     if (
         raw_facturacion_df.empty
@@ -1669,7 +1738,33 @@ def main() -> None:
     # =========================
     ranking_decesos_top10 = build_ranking_decesos_top10(ranking)
     ranking_salud_top10 = build_ranking_salud_top10(ranking_salud, ranking)
-    ranking_vida_top10 = build_ranking_vida_top10(ranking_vida)
+        ranking_vida_top10 = build_ranking_vida_top10(ranking_vida)
+
+        save_results_cache(
+            {
+                "ranking": ranking,
+                "ranking_salud": ranking_salud,
+                "ranking_vida": ranking_vida,
+                "ranking_decesos_top10": ranking_decesos_top10,
+                "ranking_salud_top10": ranking_salud_top10,
+                "ranking_vida_top10": ranking_vida_top10,
+                "altas_detail": altas_detail,
+                "anulaciones_detail": anulaciones_detail,
+                "siniestros_detail": siniestros_detail,
+                "primas_emitidas_detail": primas_emitidas_detail,
+                "primas_anuladas_detail": primas_anuladas_detail,
+                "salud_bruta_detail": salud_bruta_detail,
+                "salud_anulaciones_detail": salud_anulaciones_detail,
+                "vida_bruta_detail": vida_bruta_detail,
+                "vida_anulaciones_detail": vida_anulaciones_detail,
+                "sheet_summary": sheet_summary,
+                "fecha_desde": fecha_desde,
+                "fecha_hasta": fecha_hasta,
+                "excluded_products": excluded_products,
+            }
+        )
+
+        st.success("Cálculo guardado correctamente.")
 
     total_neta = float(ranking["FACTURACION_NETA"].sum()) if not ranking.empty else 0.0
     total_primas_netas = float(ranking["PRIMAS_NETAS"].sum()) if not ranking.empty else 0.0

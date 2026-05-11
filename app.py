@@ -1643,10 +1643,9 @@ def main() -> None:
     )
     ranking_vida = add_mapeo_to_simple_ranking(ranking_vida, mapeo)
 
-# =========================
-# CONVERTIR COLUMNAS DE POLIZAS A ENTERO
-# =========================
-
+    # =========================
+    # CONVERTIR COLUMNAS DE POLIZAS A ENTERO
+    # =========================
     columnas_enteras = [
         "POLIZAS_ALTAS",
         "POLIZAS_ANULADAS",
@@ -1660,21 +1659,14 @@ def main() -> None:
         "NUM_SINIESTROS",
     ]
 
-    for columna in columnas_enteras:
+    for dataframe in [ranking, ranking_salud, ranking_vida]:
+        for columna in columnas_enteras:
+            if columna in dataframe.columns:
+                dataframe[columna] = dataframe[columna].fillna(0).round(0).astype(int)
 
-        if columna in ranking.columns:
-        ranking[columna] = ranking[columna].fillna(0).astype(int)
-
-        if columna in ranking_salud.columns:
-        ranking_salud[columna] = ranking_salud[columna].fillna(0).astype(int)
-
-        if columna in ranking_vida.columns:
-        ranking_vida[columna] = ranking_vida[columna].fillna(0).astype(int)
-
-# =========================
-# TOPS
-# =========================
-
+    # =========================
+    # TOPS
+    # =========================
     ranking_decesos_top10 = build_ranking_decesos_top10(ranking)
     ranking_salud_top10 = build_ranking_salud_top10(ranking_salud, ranking)
     ranking_vida_top10 = build_ranking_vida_top10(ranking_vida)
